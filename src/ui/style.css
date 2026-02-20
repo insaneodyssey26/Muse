@@ -1,3 +1,9 @@
 .rounded {
-    border-radius: 12px;
+  border-radius: 12px;
+}
+
+.sort-dropdown > button:not(:hover):not(:active) {
+  background: none;
+  box-shadow: none;
+  border: none;
 }

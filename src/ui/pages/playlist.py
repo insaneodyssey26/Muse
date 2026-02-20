@@ -137,11 +137,11 @@ class PlaylistPage(Adw.Bin):
         actions_box.append(play_btn)
         
         shuffle_btn = Gtk.Button()
-        shuffle_content = Adw.ButtonContent()
-        shuffle_content.set_label("Shuffle")
-        shuffle_content.set_icon_name("media-playlist-shuffle-symbolic")
-        shuffle_btn.set_child(shuffle_content)
-        shuffle_btn.add_css_class("pill")
+        shuffle_btn.set_icon_name("media-playlist-shuffle-symbolic")
+        shuffle_btn.add_css_class("circular")
+        shuffle_btn.set_valign(Gtk.Align.CENTER)
+        shuffle_btn.set_halign(Gtk.Align.CENTER)
+        shuffle_btn.set_size_request(48, 48)
         shuffle_btn.connect("clicked", self.on_shuffle_clicked)
         actions_box.append(shuffle_btn)
 
@@ -154,21 +154,41 @@ class PlaylistPage(Adw.Bin):
         ])
         self.sort_dropdown.set_valign(Gtk.Align.CENTER)
         self.sort_dropdown.add_css_class("pill")
+        self.sort_dropdown.add_css_class("sort-dropdown")
         self.sort_dropdown.connect("notify::selected", self.on_sort_changed)
-        actions_box.append(self.sort_dropdown)
         
         self.details_col.append(actions_box)
-        # self.header_info_box.append(self.details_col) # Already appended earlier
         
         content_box.append(header_clamp)
-        
-        # 2. Songs List
+
+        # Track section: sort row + list in a tighter sub-box
+        track_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+
+        # Sort row — above the track list (hidden until tracks load)
+        sort_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        sort_row.append(self.sort_dropdown)
+        sort_row.set_visible(False)
+        self.sort_row = sort_row
+        track_section.append(sort_row)
+
+        # Songs List (hidden until tracks load to avoid empty shadow)
         self.songs_list = Gtk.ListBox()
         self.songs_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.songs_list.add_css_class("boxed-list")
         self.songs_list.connect("row-activated", self.on_song_activated)
-        
-        content_box.append(self.songs_list)
+        self.songs_list.set_visible(False)
+        track_section.append(self.songs_list)
+
+        # Empty-state label
+        self.empty_label = Gtk.Label(label="This playlist has no songs")
+        self.empty_label.add_css_class("dim-label")
+        self.empty_label.set_margin_top(24)
+        self.empty_label.set_margin_bottom(24)
+        self.empty_label.set_halign(Gtk.Align.CENTER)
+        self.empty_label.set_visible(False)
+        track_section.append(self.empty_label)
+
+        content_box.append(track_section)
         
         # Content loading spinner (for when initial data is shown but tracks are loading)
         self.content_spinner = Adw.Spinner()
@@ -603,6 +623,15 @@ class PlaylistPage(Adw.Bin):
             
         self.meta_label.set_markup(meta1) # Use markup
         self.stats_label.set_label(meta2)
+        
+        # Hide sort for albums (fixed track order)
+        is_album = self.playlist_id and (self.playlist_id.startswith("MPRE") or self.playlist_id.startswith("OLAK"))
+        
+        has_tracks = bool(tracks)
+        # Show/hide list and sort row based on whether there are tracks
+        self.songs_list.set_visible(has_tracks)
+        self.empty_label.set_visible(not has_tracks)
+        self.sort_row.set_visible(has_tracks and not is_album)
         
         if thumbnails and not append: # Don't change cover on lazy load
             url = thumbnails[-1]['url']
