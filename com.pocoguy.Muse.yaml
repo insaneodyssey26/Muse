@@ -19,10 +19,23 @@ finish-args:
   - --device=dri
 
 modules:
+  # The Deno JavaScript runtime is required to actually play stuff. It's a dependency of yt-dlp[default].
+  - name: deno
+    buildsystem: simple
+    build-commands:
+      - unzip -q deno-x86_64-unknown-linux-gnu.zip -d ${FLATPAK_DEST}/bin
+      - chmod +x ${FLATPAK_DEST}/bin/deno
+    sources:
+      - type: file
+        url: https://github.com/denoland/deno/releases/download/v2.6.10/deno-x86_64-unknown-linux-gnu.zip
+        sha256: a7c9d5c1f93bfaabe03c3c0583a8c88caf695db3cec4dea2938440038609f225
+
   - name: python-dependencies
     buildsystem: simple
     build-commands:
       - pip3 install --prefix=${FLATPAK_DEST} --no-cache-dir -r requirements.txt
+      # The yt-dlp[default] is required to play stuff; otherwise it can not find the right formats.
+      - pip3 install --prefix=${FLATPAK_DEST} --no-cache-dir --upgrade "yt-dlp[default]"
     sources:
       - type: git
         url: https://github.com/m-obeid/Muse.git
