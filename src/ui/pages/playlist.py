@@ -939,19 +939,7 @@ class PlaylistPage(Adw.Bin):
     def _move_to_top(self, set_video_id, video_id):
         print(f"Moving track {video_id} (setVideoId: {set_video_id}) to top of playlist {self.playlist_id}")
         try:
-            # moveItem can be a tuple (fromSetVideoId, toSetVideoId)
-            # Or just a setVideoId if we want to move it relatively?
-            # Actually ytmusicapi edit_playlist moveItem: 
-            # "The setVideoId of the item to move" or "(setVideoId, setVideoId)"
-            # If we want to move to TOP, we can use addToTop=True in some cases, but edit_playlist moveItem is for specific position.
-            # Wait, let's check ytmusicapi docs for edit_playlist moveItem.
-            # Usually moveItem is the setVideoId of the track you want to move.
-            # And it moves it? Where?
-            # ytmusicapi: moveItem (str | tuple): Move an item to a new position. 
-            # If a string is provided, the item is moved to the position before the item with the provided setVideoId.
-            # If a tuple is provided, the first item is moved before the second item.
             
-            # To move to top, we need to know the setVideoId of the current FIRST item.
             if not self.original_tracks:
                  return
                  
@@ -962,10 +950,8 @@ class PlaylistPage(Adw.Bin):
                  print("Item already at top.")
                  return
             
-            # Move our item BEFORE the current first item
             self.client.edit_playlist(self.playlist_id, moveItem=(set_video_id, first_set_id))
             
-            # Refresh playlist to show new order and new cover
             GLib.idle_add(self.load_playlist, self.playlist_id)
         except Exception as e:
             print(f"Error moving track: {e}")

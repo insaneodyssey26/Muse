@@ -15,16 +15,12 @@ def robust_nav(root, items, none_if_absent=False):
             # Fallback for musicVisualHeaderRenderer -> musicImmersiveHeaderRenderer
             if k == "musicVisualHeaderRenderer" and isinstance(current, dict) and k not in current and "musicImmersiveHeaderRenderer" in current:
                 k = "musicImmersiveHeaderRenderer"
-            
             # Fallback for musicDetailHeaderRenderer -> musicResponsiveHeaderRenderer
             if k == "musicDetailHeaderRenderer" and isinstance(current, dict) and k not in current and "musicResponsiveHeaderRenderer" in current:
                 k = "musicResponsiveHeaderRenderer"
-
-            # Fallback for missing 'runs' in things like subtitle
             if k == "runs" and isinstance(current, dict) and k not in current:
                 if none_if_absent:
                     return None
-                # If we expect runs[0].text, provide a dummy to continue navigation
                 if i < len(items) - 1 and items[i+1] == 0:
                     current = [{"text": ""}]
                     continue
@@ -259,7 +255,7 @@ class MusicClient:
             print(json.dumps(res, indent=2))
             return res
         except Exception as e:
-            print(f"Error editing playlist: {e}")
+            print(f"failed while editing playlist: {e}")
             return None
 
     def validate_session(self):
