@@ -150,9 +150,11 @@ class LoginDialog(Adw.Window):
                     "<span color='green'>Login Successful!</span>"
                 )
                 print("Login Successful")
-                # Clear cookies for security
-                self.webkit_view.clear_webkit_cookies()
-                self.close()
+                # Clear cookies for security and ensure window closes
+                try:
+                    self.webkit_view.clear_webkit_cookies()
+                finally:
+                    self.close()
             else:
                 self.lbl_status.set_markup(
                     "<span color='red'>Login Failed after capture.</span>"

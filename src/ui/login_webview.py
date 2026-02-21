@@ -140,6 +140,11 @@ class WebkitLoginView(Adw.Bin):
     def clear_webkit_cookies(self):
         """Clears all cookies from the WebKit session for security."""
         print("Clearing WebKit session cookies...")
-        session = self.webview.get_network_session()
-        cm = session.get_cookie_manager()
-        cm.delete_all_cookies()
+        try:
+            session = self.webview.get_network_session()
+            manager = session.get_website_data_manager()
+            # 0 means all time. WebKit.WebsiteDataTypes.COOKIES = 1 << 0
+            manager.clear(WebKit.WebsiteDataTypes.COOKIES, 0, None, None, None)
+            print("WebKit session cookies cleared.")
+        except Exception as e:
+            print(f"Error clearing WebKit cookies: {e}")
