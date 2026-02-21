@@ -192,14 +192,12 @@ See [here](https://github.com/m-obeid/Muse/pull/2#issue-3965386248)
    flatpak run com.pocoguy.Muse
    ```
 
-**Authentication:** Open your browser, go to YouTube Music, and copy request headers as described [here](https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html).
-Then run `flatpak run --command=sh com.pocoguy.Muse` and inside the shell run `mkdir -p ~/data/Muse && cd ~/data/Muse && ytmusicapi browser`.
-Paste the headers and press Ctrl-D.
 
 ## Authentication
 
 > [!NOTE]
 > You can now authenticate using the app itself through an embedded WebKit browser!
+> Below are the old, manual instructions.
 
 This app uses `ytmusicapi` for backend data. Authentication allows access to your library and higher quality streams.
 
@@ -208,6 +206,10 @@ To authenticate, you need to generate a `browser.json` file.
 - Run: `ytmusicapi browser`
 - Follow instructions to log in via your browser and paste the headers. It is recommended to use a private browser profile for this, so that you don't get logged out of the account from the app.
 - The output will be saved as `browser.json` in the project root directory.
+
+**Flatpak:** Open your browser, go to YouTube Music, and copy request headers as described [here](https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html).
+Then run `flatpak run --command=sh com.pocoguy.Muse` and inside the shell run `mkdir -p ~/data/Muse && cd ~/data/Muse && ytmusicapi browser`.
+Paste the headers and press Ctrl-D.
 
 If you don't have a `browser.json` file, the app will use the unauthenticated API, which can cause playback issues.
 
