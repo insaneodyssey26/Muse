@@ -167,7 +167,7 @@ See [here](https://github.com/m-obeid/Muse/pull/2#issue-3965386248)
 1. Install Flatpak and required runtimes:
 
    ```bash
-   flatpak install flathub org.gnome.Platform//49 org.gnome.Sdk//49
+   flatpak install flathub org.gnome.Platform//49 org.gnome.Sdk//49 org.freedesktop.Sdk.Extension.node24//24.08
    ```
 
 2. Clone the repository:

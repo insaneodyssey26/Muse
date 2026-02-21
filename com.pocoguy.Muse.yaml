@@ -2,6 +2,8 @@ app-id: com.pocoguy.Muse
 runtime: org.gnome.Platform
 runtime-version: '49'
 sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.node24
 command: muse
 
 # Allow network access during build for pip downloads
@@ -19,16 +21,13 @@ finish-args:
   - --device=dri
 
 modules:
-  # The Deno JavaScript runtime is required to actually play stuff. It's a dependency of yt-dlp[default].
-  - name: deno
+  # Install Node.js to /app/bin for runtime availability
+  - name: nodejs-runtime
     buildsystem: simple
     build-commands:
-      - unzip -q deno-x86_64-unknown-linux-gnu.zip -d ${FLATPAK_DEST}/bin
-      - chmod +x ${FLATPAK_DEST}/bin/deno
-    sources:
-      - type: file
-        url: https://github.com/denoland/deno/releases/download/v2.6.10/deno-x86_64-unknown-linux-gnu.zip
-        sha256: a7c9d5c1f93bfaabe03c3c0583a8c88caf695db3cec4dea2938440038609f225
+      - install -Dm755 /usr/lib/sdk/node24/bin/node ${FLATPAK_DEST}/bin/node
+      - cp -ra /usr/lib/sdk/node24/lib ${FLATPAK_DEST}/ || true
+    sources: []
 
   - name: python-dependencies
     buildsystem: simple
