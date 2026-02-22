@@ -20,9 +20,15 @@ class WebkitLoginView(Adw.Bin):
 
         self.webview = WebKit.WebView()
         settings = self.webview.get_settings()
+
+        # Google blocks non-standard browsers. We must masquerade as standard Chrome Windows and enable features it expects.
         settings.set_user_agent(
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
+            "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0"
         )
+        settings.set_enable_javascript(True)
+        settings.set_enable_webgl(True)
+        settings.set_enable_html5_local_storage(True)
+        settings.set_enable_html5_database(True)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.append(self.webview)
@@ -126,7 +132,7 @@ class WebkitLoginView(Adw.Bin):
                 # Ensure we have a User-Agent if we came from a manual click and headers were empty
                 if "User-Agent" not in self.captured_headers:
                     self.captured_headers["User-Agent"] = (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+                        "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0"
                     )
 
                 self.finished = True
