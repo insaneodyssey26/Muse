@@ -17,11 +17,20 @@ class QueueItem(GObject.Object):
     def is_playing(self, value):
         self._is_playing = value
 
-    def __init__(self, track, index, is_playing):
+    @GObject.Property(type=bool, default=False)
+    def is_paused(self):
+        return self._is_paused
+
+    @is_paused.setter
+    def is_paused(self, value):
+        self._is_paused = value
+
+    def __init__(self, track, index, is_playing, is_paused=False):
         super().__init__()
         self.track = track
         self.index = index
         self._is_playing = is_playing
+        self._is_paused = is_paused
 
 
 class QueueRowWidget(Gtk.Box):
@@ -51,7 +60,7 @@ class QueueRowWidget(Gtk.Box):
         self.indicator_lbl.add_css_class("dim-label")
         self.indicator_lbl.set_width_chars(3)
         self.indicator_icon = Gtk.Image.new_from_icon_name(
-            "media-playback-start-symbolic"
+            "media-playback-start-symbolic"  # Default
         )
         self.indicator_icon.add_css_class("accent")
 
@@ -94,6 +103,7 @@ class QueueRowWidget(Gtk.Box):
         self.panel = panel
 
         item.connect("notify::is-playing", self._on_item_property_changed)
+        item.connect("notify::is-paused", self._on_item_property_changed)
         self._update_playing_ui()
 
     def _on_item_property_changed(self, item, pspec):
@@ -120,9 +130,14 @@ class QueueRowWidget(Gtk.Box):
 
         if item.is_playing:
             self.add_css_class("playing")
+            if item.is_paused:
+                self.indicator_icon.set_from_icon_name("media-playback-start-symbolic")
+            else:
+                self.indicator_icon.set_from_icon_name("media-playback-pause-symbolic")
             self.indicator_stack.set_visible_child_name("playing")
         else:
             self.remove_css_class("playing")
+            # For non-playing items, we just show the index
             self.indicator_lbl.set_label(str(item.index + 1))
             self.indicator_stack.set_visible_child_name("index")
 
@@ -324,8 +339,11 @@ class QueuePanel(Gtk.Box):
             current_idx = self.player.current_queue_index
 
             items = []
+            player_state = self.player.get_state_string()
+            is_paused = player_state in ("paused", "stopped")
+
             for i, track in enumerate(queue):
-                items.append(QueueItem(track, i, i == current_idx))
+                items.append(QueueItem(track, i, i == current_idx, is_paused))
 
             self.store.splice(0, self.store.get_n_items(), items)
             self._last_queue_len = len(queue)
@@ -389,13 +407,18 @@ class QueuePanel(Gtk.Box):
 
         self._programmatic_update = True
         try:
+            player_state = self.player.get_state_string()
+            is_paused_global = player_state in ("paused", "stopped")
+
             for i in range(n):
                 item = self.store.get_item(i)
                 was_playing = item.is_playing
+                was_paused = item.is_paused
                 is_playing = i == current_idx
 
-                if was_playing != is_playing:
+                if was_playing != is_playing or was_paused != is_paused_global:
                     item.is_playing = is_playing
+                    item.is_paused = is_paused_global
 
             if current_idx >= 0 and current_idx < n:
                 self.selection_model.set_selected(current_idx)

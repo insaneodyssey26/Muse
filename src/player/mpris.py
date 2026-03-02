@@ -149,6 +149,12 @@ class MuseMprisAdapter(MprisAdapter):
         except:
             pass
 
+    def is_repeating(self) -> bool:
+        return getattr(self.player, "repeat_mode", "none") != "none"
+
+    def is_playlist(self) -> bool:
+        return getattr(self.player, "repeat_mode", "none") == "all"
+
     def get_loop_status(self) -> LoopStatus:
         mode = getattr(self.player, "repeat_mode", "none")
         if mode == "track":
@@ -159,16 +165,11 @@ class MuseMprisAdapter(MprisAdapter):
 
     def set_loop_status(self, value: LoopStatus):
         if value == LoopStatus.TRACK:
-            self.player.repeat_mode = "track"
+            self.player.set_repeat_mode("track")
         elif value == LoopStatus.PLAYLIST:
-            self.player.repeat_mode = "all"
+            self.player.set_repeat_mode("all")
         else:
-            self.player.repeat_mode = "none"
-
-        # We don't have a specific looping signal yet, but D-Bus emits properties-changed via mpris-server
-        # We can trigger on_options to broadcast the state
-        if hasattr(self.player, "mpris_events"):
-            self.player.mpris_events.on_options()
+            self.player.set_repeat_mode("none")
 
     def metadata(self):
         try:
