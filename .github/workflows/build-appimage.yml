@@ -9,8 +9,8 @@ on:
 
 jobs:
   appimage:
-    name: Build AppImage (${{ matrix.arch }})
-    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    name: Build AppImage
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         arch: [x86_64, aarch64]
@@ -22,52 +22,52 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            python3-pip python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 \
-            libglib2.0-dev libcairo2-dev python3-dev \
-            fuse libfuse2 file
+          sudo apt-get install -y python3-pip python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libglib2.0-dev libcairo2-dev python3-dev libfuse2
 
       - name: Install appimage-builder
         run: |
-          ARCH=$(uname -m)
-          sudo wget "https://github.com/AppImageCrafters/appimage-builder/releases/download/v1.1.0/appimage-builder-1.1.0-${ARCH}.AppImage" \
-            -O /tmp/appimage-builder.AppImage
-          sudo chmod +x /tmp/appimage-builder.AppImage
-          # Extract rather than run as AppImage to avoid FUSE requirement
-          cd /tmp && sudo /tmp/appimage-builder.AppImage --appimage-extract
-          sudo mv /tmp/squashfs-root /opt/appimage-builder
-          sudo ln -s /opt/appimage-builder/AppRun /usr/local/bin/appimage-builder
+          sudo wget https://github.com/AppImageCrafters/appimage-builder/releases/download/v1.1.0/appimage-builder-1.1.0-x86_64.AppImage -O /usr/local/bin/appimage-builder
+          sudo chmod +x /usr/local/bin/appimage-builder
 
       - name: Prepare AppDir
         run: |
-          PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-          
-          mkdir -p AppDir/usr/share/muse AppDir/usr/bin \
-                   AppDir/usr/share/applications \
-                   AppDir/usr/share/icons/hicolor/scalable/apps
-
+          mkdir -p AppDir/usr/share/muse AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
           cp -r src assets requirements.txt AppDir/usr/share/muse/
           cp com.pocoguy.Muse.desktop AppDir/usr/share/applications/
-          cp assets/icons/hicolor/scalable/actions/compass2-symbolic.svg \
-             AppDir/usr/share/icons/hicolor/scalable/apps/com.pocoguy.Muse.svg
+          cp assets/icons/hicolor/scalable/actions/compass2-symbolic.svg AppDir/usr/share/icons/hicolor/scalable/apps/com.pocoguy.Muse.svg
+          glib-compile-resources --sourcedir=. src/muse.gresource.xml --target=AppDir/usr/share/muse/src/muse.gresource
+          sudo pip3 install -r requirements.txt --prefix=AppDir/usr --no-cache-dir --break-system-packages
+          sudo pip3 install "yt-dlp[default]" --prefix=AppDir/usr --no-cache-dir --break-system-packages
 
-          glib-compile-resources --sourcedir=. src/muse.gresource.xml \
-            --target=AppDir/usr/share/muse/src/muse.gresource
-
-          pip3 install -r requirements.txt \
-            --prefix=AppDir/usr --no-cache-dir --break-system-packages
-          pip3 install "yt-dlp[default]" \
-            --prefix=AppDir/usr --no-cache-dir --break-system-packages
-
-          cat > AppDir/usr/bin/muse << EOF
+          # Create launcher
+          cat > AppDir/usr/bin/muse << 'EOF'
           #!/bin/bash
-          export PYTHONPATH="\$APPDIR/usr/lib/python${PYTHON_VERSION}/site-packages:\$PYTHONPATH"
-          cd "\$APPDIR/usr/share/muse"
-          exec python3 src/main.py "\$@"
+          export PYTHONPATH="$APPDIR/usr/lib/python3.12/site-packages:$PYTHONPATH"
+          cd "$APPDIR/usr/share/muse"
+          exec python3 src/main.py "$@"
           EOF
           chmod +x AppDir/usr/bin/muse
 
+      - name: Set up QEMU
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Adapt Architecture for aarch64
+        if: matrix.arch == 'aarch64'
+        run: |
+          sed -i 's/x86_64/aarch64/g' AppImageBuilder.yml
+          sed -i 's/amd64/arm64/g' AppImageBuilder.yml
+          sed -i 's|http://archive.ubuntu.com/ubuntu/|http://ports.ubuntu.com/ubuntu-ports/|g' AppImageBuilder.yml
+
+      - name: Setup multiarch apt
+        if: matrix.arch == 'aarch64'
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update || true
+
       - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
         run: |
           appimage-builder --recipe AppImageBuilder.yml
 
