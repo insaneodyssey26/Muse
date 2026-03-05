@@ -1,0 +1,76 @@
+name: Build AppImage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  appimage:
+    name: Build AppImage
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libglib2.0-dev libcairo2-dev python3-dev
+
+      - name: Install appimage-builder
+        run: |
+          sudo wget https://github.com/AppImageCrafters/appimage-builder/releases/download/v1.1.0/appimage-builder-1.1.0-x86_64.AppImage -O /usr/local/bin/appimage-builder
+          sudo chmod +x /usr/local/bin/appimage-builder
+
+      - name: Prepare AppDir
+        run: |
+          mkdir -p AppDir/usr/share/muse AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
+          cp -r src assets requirements.txt AppDir/usr/share/muse/
+          cp com.pocoguy.Muse.desktop AppDir/usr/share/applications/
+          cp assets/icons/hicolor/scalable/actions/compass2-symbolic.svg AppDir/usr/share/icons/hicolor/scalable/apps/com.pocoguy.Muse.svg
+          glib-compile-resources --sourcedir=. src/muse.gresource.xml --target=AppDir/usr/share/muse/src/muse.gresource
+          pip3 install -r requirements.txt --prefix=AppDir/usr --no-cache-dir
+          pip3 install "yt-dlp[default]" --prefix=AppDir/usr --no-cache-dir
+
+          # Create launcher
+          cat > AppDir/usr/bin/muse << 'EOF'
+          #!/bin/bash
+          export PYTHONPATH="$APPDIR/usr/lib/python3.12/site-packages:$PYTHONPATH"
+          cd "$APPDIR/usr/share/muse"
+          exec python3 src/main.py "$@"
+          EOF
+          chmod +x AppDir/usr/bin/muse
+
+      - name: Set up QEMU
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Adapt Architecture for aarch64
+        if: matrix.arch == 'aarch64'
+        run: |
+          sed -i 's/x86_64/aarch64/g' AppImageBuilder.yml
+          sed -i 's/amd64/arm64/g' AppImageBuilder.yml
+          sed -i 's/archive.ubuntu.com/ports.ubuntu.com/g' AppImageBuilder.yml
+
+      - name: Setup multiarch apt
+        if: matrix.arch == 'aarch64'
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update || true
+
+      - name: Build AppImage
+        run: |
+          appimage-builder --recipe AppImageBuilder.yml
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mixtapes-${{ matrix.arch }}-appimage
+          path: "*.AppImage"

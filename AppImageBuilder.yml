@@ -1,0 +1,44 @@
+version: 1
+
+AppDir:
+  path: ./AppDir
+
+  app_info:
+    id: com.pocoguy.Muse
+    name: Mixtapes
+    icon: com.pocoguy.Muse
+    version: latest
+    exec: usr/bin/muse
+    exec_args: "$@"
+
+  apt:
+    arch: [amd64]
+    allow_unauthenticated: true
+    sources:
+      - sourceline: "deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ noble main restricted universe multiverse"
+      - sourceline: "deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ noble-updates main restricted universe multiverse"
+    include:
+      - python3
+      - python3-gi
+      - gir1.2-gtk-4.0
+      - gir1.2-adw-1
+      - gir1.2-webkit-6.0
+      - gstreamer1.0-plugins-base
+      - gstreamer1.0-plugins-good
+      - gstreamer1.0-plugins-bad
+      - gstreamer1.0-plugins-ugly
+      - libgstreamer1.0-0
+      - gstreamer1.0-gl
+      - nodejs
+    exclude:
+      - tzdata
+
+  runtime:
+    env:
+      PATH: "${APPDIR}/usr/bin:${PATH}"
+      PYTHONHOME: "${APPDIR}/usr"
+      PYTHONPATH: "${APPDIR}/usr/lib/python3.12/site-packages"
+
+AppImage:
+  arch: x86_64
+  file_name: "Mixtapes-x86_64.AppImage"
