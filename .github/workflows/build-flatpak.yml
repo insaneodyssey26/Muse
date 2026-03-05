@@ -33,7 +33,7 @@ jobs:
         run: |
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub org.freedesktop.Sdk.Extension.node24//24.08
-          xvfb-run --auto-servernum flatpak-builder --user --repo=repo --disable-rofiles-fuse --install-deps-from=flathub --force-clean --default-branch=master --arch=${{ matrix.arch }} flatpak_app com.pocoguy.Muse.yaml
+          xvfb-run --auto-servernum flatpak-builder --env=FLATPAK_ENABLE_SDK_EXT=node24 --user --repo=repo --disable-rofiles-fuse --install-deps-from=flathub --force-clean --default-branch=master --arch=${{ matrix.arch }} flatpak_app com.pocoguy.Muse.yaml
           flatpak build-bundle repo Mixtapes-${{ matrix.arch }}.flatpak com.pocoguy.Muse master
 
       - name: Upload artifact
