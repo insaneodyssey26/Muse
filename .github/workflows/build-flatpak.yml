@@ -1,5 +1,4 @@
 name: Build Flatpak
-
 on:
   push:
     branches: [main]
@@ -14,7 +13,6 @@ jobs:
     strategy:
       matrix:
         arch: [x86_64, aarch64]
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -31,8 +29,7 @@ jobs:
 
       - name: Build using Flatpak Builder
         run: |
-          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user -y flathub org.freedesktop.Sdk.Extension.node24//24.08
+          sudo flatpak install -y flathub org.freedesktop.Sdk.Extension.node24//24.08
           FLATPAK_ENABLE_SDK_EXT=node24 xvfb-run --auto-servernum flatpak-builder --user --repo=repo --disable-rofiles-fuse --install-deps-from=flathub --force-clean --default-branch=master --arch=${{ matrix.arch }} flatpak_app com.pocoguy.Muse.yaml
           flatpak build-bundle repo Mixtapes-${{ matrix.arch }}.flatpak com.pocoguy.Muse master
 
@@ -51,7 +48,6 @@ jobs:
       contents: read
       pages: write
       id-token: write
-
     steps:
       - name: Download all flatpak artifacts
         uses: actions/download-artifact@v4
