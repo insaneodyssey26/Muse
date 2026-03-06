@@ -25,6 +25,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo apt-get update
           sudo apt-get install -y python3-pip python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libglib2.0-dev-bin libcairo2-dev python3-dev libfuse2 libgirepository1.0-dev libxml2-utils wget file binutils patch qemu-user-static
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
             sudo dpkg --add-architecture arm64
@@ -74,7 +75,7 @@ jobs:
           cat > AppDir/usr/bin/muse << EOF
           #!/bin/bash
           # Include all possible bundled python paths
-          # On Arch, we use a dynamic python version discovery
+          # Dynamic python version discovery
           PYTHON_VERSION=\$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
           export PYTHONPATH="\$APPDIR/usr/share/muse:\$APPDIR/usr/lib/python\$PYTHON_VERSION/site-packages:\$APPDIR/usr/lib/python3/dist-packages"
           export PYTHONHOME="\$APPDIR/usr"
@@ -88,12 +89,6 @@ jobs:
         run: |
           sed -i 's/x86_64/aarch64/g' AppImageBuilder.yml
           sed -i 's/amd64/arm64/g' AppImageBuilder.yml
-          # No need to change repo URLs for Arch in the same way as Ubuntu
-
-      - name: Setup multiarch (not needed for Arch repo)
-        if: matrix.arch == 'aarch64'
-        run: |
-          echo "Using Arch ARM64 container, no manual dpkg setup needed"
 
       - name: Build AppImage
         env:
