@@ -37,7 +37,7 @@ jobs:
             --default-branch=master \
             --arch=${{ matrix.arch }} \
             flatpak_app com.pocoguy.Muse.yaml
-          flatpak build-bundle repo Mixtapes-${{ matrix.arch }}.flatpak com.pocoguy.Muse master
+          flatpak build-bundle --arch=${{ matrix.arch }} repo Mixtapes-${{ matrix.arch }}.flatpak com.pocoguy.Muse master
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
