@@ -28,6 +28,9 @@ AppDir:
       - python3-urllib3
       - ca-certificates
       - libssl3
+      - glycin-loaders
+      - node-cjs-module-lexer
+      - bubblewrap
     exclude:
       - libgcc-s1
       - libstdc++6
@@ -42,6 +45,10 @@ AppDir:
       PYTHONPATH: "${APPDIR}/usr/share/muse:${APPDIR}/usr/lib/python3.12/site-packages:${APPDIR}/usr/lib/python3.13/site-packages:${APPDIR}/usr/lib/python3/dist-packages"
       SSL_CERT_FILE: "${APPDIR}/etc/ssl/certs/ca-certificates.crt"
       SSL_CERT_DIR: "${APPDIR}/etc/ssl/certs"
+      XDG_DATA_DIRS: "${APPDIR}/usr/share:${XDG_DATA_DIRS}"
+    path_mappings:
+      - /usr/libexec/glycin-loaders:${APPDIR}/usr/libexec/glycin-loaders
+      - /usr/share/nodejs:${APPDIR}/usr/share/nodejs
 
 AppImage:
   arch: x86_64

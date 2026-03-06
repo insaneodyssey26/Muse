@@ -65,9 +65,11 @@ jobs:
           # Debug: List bundled site-packages and check critical files
           echo "Bundled site-packages contents:"
           ls -R "$SITE_PACKAGES" | head -n 50
-          echo "Checking for critical binaries and certs:"
+          echo "Checking for critical binaries, certs, and modules:"
           ls -l AppDir/usr/bin/node || echo "Node binary missing!"
           ls -l AppDir/etc/ssl/certs/ca-certificates.crt || echo "CA certificates missing!"
+          ls -R AppDir/usr/libexec/glycin-loaders || echo "Glycin loaders missing!"
+          ls -R AppDir/usr/share/nodejs || echo "Nodejs shared modules missing!"
 
           # Create C loader to satisfy appimage-builder ELF requirement
           cat > muse_loader.c << EOF
