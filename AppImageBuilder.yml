@@ -26,6 +26,8 @@ AppDir:
       - nodejs
       - python3-requests
       - python3-urllib3
+      - ca-certificates
+      - libssl3
     exclude:
       - libgcc-s1
       - libstdc++6
@@ -38,6 +40,8 @@ AppDir:
       # On Arch, it's typically python3.13 or similar
       PYTHONHOME: "${APPDIR}/usr"
       PYTHONPATH: "${APPDIR}/usr/share/muse:${APPDIR}/usr/lib/python3.12/site-packages:${APPDIR}/usr/lib/python3.13/site-packages:${APPDIR}/usr/lib/python3/dist-packages"
+      SSL_CERT_FILE: "${APPDIR}/etc/ssl/certs/ca-certificates.crt"
+      SSL_CERT_DIR: "${APPDIR}/etc/ssl/certs"
 
 AppImage:
   arch: x86_64

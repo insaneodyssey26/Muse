@@ -2,6 +2,7 @@ import os
 import json
 from ytmusicapi import YTMusic
 import ytmusicapi.navigation
+from gi.repository import GLib
 
 # Monkeypatch ytmusicapi.navigation.nav to handle UI changes like musicImmersiveHeaderRenderer
 _original_nav = ytmusicapi.navigation.nav
@@ -61,7 +62,8 @@ class MusicClient:
 
     def _init(self):
         self.api = None
-        self.auth_path = os.path.join(os.getcwd(), "data", "headers_auth.json")
+        data_dir = os.path.join(GLib.get_user_data_dir(), "muse")
+        self.auth_path = os.path.join(data_dir, "headers_auth.json")
         self._is_authed = False
         self._playlist_cache = {}  # Cache fully-fetched playlists
         self._user_info = None  # Cache for account info
