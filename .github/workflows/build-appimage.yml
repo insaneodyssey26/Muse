@@ -62,9 +62,12 @@ jobs:
           # yt-dlp is pure python, but we ensures it's in the target
           pip3 install "yt-dlp[default]" --target="$SITE_PACKAGES" --no-cache-dir --break-system-packages
 
-          # Debug: List bundled site-packages
+          # Debug: List bundled site-packages and check critical files
           echo "Bundled site-packages contents:"
-          ls -R "$SITE_PACKAGES"
+          ls -R "$SITE_PACKAGES" | head -n 50
+          echo "Checking for critical binaries and certs:"
+          ls -l AppDir/usr/bin/node || echo "Node binary missing!"
+          ls -l AppDir/etc/ssl/certs/ca-certificates.crt || echo "CA certificates missing!"
 
           # Create C loader to satisfy appimage-builder ELF requirement
           cat > muse_loader.c << EOF
@@ -92,11 +95,30 @@ jobs:
               snprintf(pythonhome, sizeof(pythonhome), "%s/usr", appdir);
               setenv("PYTHONHOME", pythonhome, 1);
 
-              // Set SSL_CERT_FILE and SSL_CERT_DIR
-              char cert_file[1024], cert_dir[1024];
-              snprintf(cert_file, sizeof(cert_file), "%s/etc/ssl/certs/ca-certificates.crt", appdir);
+              // Set SSL_CERT_FILE and SSL_CERT_DIR with fallback logic
+              const char *ssl_files[] = {
+                  "/etc/ssl/certs/ca-certificates.crt",                // Debian/Ubuntu/Arch
+                  "/etc/pki/tls/certs/ca-bundle.crt",                  // Fedora/RHEL
+                  "/etc/ssl/ca-bundle.pem",                            // OpenSUSE
+                  "/etc/pki/tls/cacert.pem",                           // CentOS
+                  NULL
+              };
+              int found = 0;
+              for (int i = 0; ssl_files[i] != NULL; i++) {
+                  if (access(ssl_files[i], R_OK) == 0) {
+                      setenv("SSL_CERT_FILE", ssl_files[i], 1);
+                      found = 1;
+                      break;
+                  }
+              }
+              if (!found) {
+                  char cert_file[1024];
+                  snprintf(cert_file, sizeof(cert_file), "%s/etc/ssl/certs/ca-certificates.crt", appdir);
+                  setenv("SSL_CERT_FILE", cert_file, 1);
+              }
+              
+              char cert_dir[1024];
               snprintf(cert_dir, sizeof(cert_dir), "%s/etc/ssl/certs", appdir);
-              setenv("SSL_CERT_FILE", cert_file, 1);
               setenv("SSL_CERT_DIR", cert_dir, 1);
 
               // Work in the share/muse directory
