@@ -191,8 +191,8 @@ class ExpandedPlayer(Gtk.Box):
         bottom_box.set_halign(Gtk.Align.FILL)
         bottom_box.set_margin_top(24)
 
-        vol_icon = Gtk.Image.new_from_icon_name("audio-volume-high-symbolic")
-        vol_icon.set_opacity(0.7)
+        self.vol_icon = Gtk.Image.new_from_icon_name("audio-volume-high-symbolic")
+        self.vol_icon.set_opacity(0.7)
 
         self.volume_scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL)
         self.volume_scale.set_range(0, 1.0)
@@ -207,7 +207,7 @@ class ExpandedPlayer(Gtk.Box):
             "clicked", lambda x: self.stack.set_visible_child_name("queue")
         )
 
-        bottom_box.append(vol_icon)
+        bottom_box.append(self.vol_icon)
         bottom_box.append(self.volume_scale)
         bottom_box.append(self.show_queue_btn)
         main_box.append(bottom_box)
@@ -481,8 +481,21 @@ class ExpandedPlayer(Gtk.Box):
         self.player.set_volume(scale.get_value())
 
     def on_volume_changed(self, player, volume, muted):
-        if abs(self.volume_scale.get_value() - volume) > 0.01:
-            self.volume_scale.set_value(volume)
+        # Use apparent volume (0 if muted) for the scale to match MPRIS
+        display_volume = 0.0 if muted else volume
+
+        if abs(self.volume_scale.get_value() - display_volume) > 0.01:
+            self.volume_scale.set_value(display_volume)
+
+        # Update Icon
+        if muted or volume == 0:
+            self.vol_icon.set_from_icon_name("audio-volume-muted-symbolic")
+        elif volume < 0.33:
+            self.vol_icon.set_from_icon_name("audio-volume-low-symbolic")
+        elif volume < 0.66:
+            self.vol_icon.set_from_icon_name("audio-volume-medium-symbolic")
+        else:
+            self.vol_icon.set_from_icon_name("audio-volume-high-symbolic")
 
     def _on_artist_btn_clicked(self, btn):
         if self.on_artist_click:

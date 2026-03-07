@@ -440,9 +440,11 @@ class PlayerBar(Gtk.Box):
         self.player.set_volume(val)
 
     def on_volume_changed(self, player, volume, muted):
-        # Update Scale (block signal to avoid loop if needed, but set_value usually handles it or we check diff)
-        if abs(self.volume_scale.get_value() - volume) > 0.01:
-            self.volume_scale.set_value(volume)
+        # Use apparent volume (0 if muted) for the scale to match MPRIS
+        display_volume = 0.0 if muted else volume
+
+        if abs(self.volume_scale.get_value() - display_volume) > 0.01:
+            self.volume_scale.set_value(display_volume)
 
         # Update Icon
         if muted or volume == 0:

@@ -817,11 +817,14 @@ class Player(GObject.Object):
     def set_volume(self, value):
         # value 0.0 to 1.0
         self.player.set_property("volume", float(value))
-        self.emit("volume-changed", float(value), self.get_mute())
+        if value > 0 and self.get_mute():
+            self.set_mute(False)
+        else:
+            GLib.idle_add(self.emit, "volume-changed", float(value), self.get_mute())
 
     def get_mute(self):
         return self.player.get_property("mute")
 
     def set_mute(self, is_muted):
         self.player.set_property("mute", is_muted)
-        self.emit("volume-changed", self.get_volume(), is_muted)
+        GLib.idle_add(self.emit, "volume-changed", self.get_volume(), is_muted)

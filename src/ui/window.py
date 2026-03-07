@@ -354,6 +354,27 @@ class MainWindow(Adw.ApplicationWindow):
         page.set_icon_name("settings-symbolic")
         prefs.add(page)
 
+        app_group = Adw.PreferencesGroup()
+        app_group.set_title("Application")
+        page.add(app_group)
+
+        import logger
+
+        debug_row = Adw.ActionRow()
+        debug_row.set_title("Enable Debug Logs")
+        debug_row.set_subtitle("Print diagnostic information to the terminal")
+
+        debug_switch = Gtk.Switch()
+        debug_switch.set_valign(Gtk.Align.CENTER)
+        debug_switch.set_active(logger.get_debug_logs())
+        debug_switch.connect(
+            "notify::active",
+            lambda switch, param: logger.set_debug_logs(switch.get_active()),
+        )
+
+        debug_row.add_suffix(debug_switch)
+        app_group.add(debug_row)
+
         group = Adw.PreferencesGroup()
         group.set_title("Account")
         page.add(group)
