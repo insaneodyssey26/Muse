@@ -154,7 +154,7 @@ Here are install commands for some common package managers:
 
    ```bash
    git clone https://github.com/m-obeid/Mixtapes.git
-   cd Muse
+   cd Mixtapes
    ```
 
 2. Install Python dependencies within a virtual environment:
@@ -196,9 +196,14 @@ Automated builds for Flatpak are available for every change made to the reposito
 You can quickly add the automated repository to receive updates by running:
 
 ```bash
-flatpak remote-add --user --if-not-exists mixtapes https://m-obeid.github.io/Muse/mixtapes.flatpakrepo
+flatpak remote-add --user --if-not-exists mixtapes https://m-obeid.github.io/Mixtapes/mixtapes.flatpakrepo
 flatpak install --user mixtapes com.pocoguy.Muse
 ```
+
+> [!NOTE]
+> Recently, the repository name was changed from "Muse" to "Mixtapes".
+> If you are updating from an older version, you might need to remove the old repository first:
+> `flatpak remote-delete --user mixtapes`
 
 _(Alternatively, you can download the offline bundle file:)_
 
@@ -219,7 +224,7 @@ flatpak install --user ./Mixtapes-x86_64.flatpak
 
    ```bash
    git clone https://github.com/m-obeid/Mixtapes.git
-   cd Muse
+   cd Mixtapes
    ```
 
 3. Build and install:

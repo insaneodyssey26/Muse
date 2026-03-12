@@ -91,7 +91,7 @@ jobs:
           cat << EOF > repo/mixtapes.flatpakrepo
           [Flatpak Repo]
           Title=Mixtapes
-          Url=https://${{ github.repository_owner }}.github.io/Muse/
+          Url=https://${{ github.repository_owner }}.github.io/Mixtapes/
           Homepage=https://github.com/${{ github.repository }}
           Comment=A modern, Linux-first YouTube Music player
           Description=A modern, Linux-first YouTube Music player

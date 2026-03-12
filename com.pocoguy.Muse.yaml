@@ -67,7 +67,7 @@ modules:
       - chmod +x ${FLATPAK_DEST}/bin/muse
     sources:
       - type: git
-        url: https://github.com/m-obeid/Muse.git
+        url: https://github.com/m-obeid/Mixtapes.git
         branch: main
       - type: file
         path: com.pocoguy.Muse.desktop
