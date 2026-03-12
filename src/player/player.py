@@ -43,9 +43,10 @@ class Player(GObject.Object):
         self.client = MusicClient()
         self.player = Gst.ElementFactory.make("playbin", "player")
 
-        # Disable video output by using a fakesink
-        fakesink = Gst.ElementFactory.make("fakesink", "video-fakesink")
-        self.player.set_property("video-sink", fakesink)
+        # Disable video output using playbin flags (unsetting GST_PLAY_FLAG_VIDEO)
+        # GST_PLAY_FLAG_VIDEO is 1 << 0
+        flags = self.player.get_property("flags")
+        self.player.set_property("flags", flags & ~(1 << 0))
 
         self.ydl_opts = {
             "format": "bestaudio/best",
