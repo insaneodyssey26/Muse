@@ -5,7 +5,6 @@ sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.node24
 command: muse
-
 build-options:
   append-path: /usr/lib/sdk/node24/bin
   env:
@@ -13,7 +12,6 @@ build-options:
     FLATPAK_ENABLE_SDK_EXT: node24
   build-args:
     - --share=network
-
 finish-args:
   - --share=ipc
   - --socket=fallback-x11
@@ -23,7 +21,6 @@ finish-args:
   - --persist=.
   - --device=dri
   - --socket=session-bus
-
 modules:
   - name: nodejs-runtime
     buildsystem: simple
@@ -41,6 +38,7 @@ modules:
     build-commands:
       - pip3 install --prefix=${FLATPAK_DEST} --no-cache-dir -r requirements.txt
       - pip3 install --prefix=${FLATPAK_DEST} --no-cache-dir --upgrade "yt-dlp[default]"
+      - pip3 install --prefix=${FLATPAK_DEST} --no-cache-dir "yt-dlp-ejs"
     sources:
       - type: file
         path: requirements.txt
