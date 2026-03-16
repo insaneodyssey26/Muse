@@ -388,7 +388,7 @@ class MainWindow(Adw.ApplicationWindow):
         about = Adw.AboutDialog()
         about.set_application_name("Mixtapes")
         about.set_developer_name("POCOGuy")
-        about.set_version("alpha 202603071729")
+        about.set_version("alpha 202603162324")
         about.set_website("https://www.pocoguy.com/")
         about.set_copyright("© 2026 POCOGuy")
         about.set_license_type(Gtk.License.GPL_3_0)
