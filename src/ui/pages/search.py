@@ -81,6 +81,9 @@ class SearchPage(Adw.Bin):
         # Show explore initially
         self.stack.set_visible_child_name("explore")
 
+        # Load explore data
+        self.load_explore_data()
+
         # Player listeners
         self.loading_row_spinner = None
         self.player.connect("state-changed", self.on_player_state_changed)

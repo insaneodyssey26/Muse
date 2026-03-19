@@ -1,6 +1,6 @@
-import gi
 import os
 import threading
+import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -36,8 +36,10 @@ class MainWindow(Adw.ApplicationWindow):
         self.setup_actions()
 
         # Key Controller (Global Type to Search)
+        # Use CAPTURE phase to ensure we see events before children (like SearchEntry) swallow them
         ctrl = Gtk.EventControllerKey()
-        ctrl.connect("key-released", self.on_window_key_released)
+        ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        ctrl.connect("key-pressed", self.on_window_key_pressed)
         self.add_controller(ctrl)
 
         # Menu (About/Preferences)
@@ -174,8 +176,6 @@ class MainWindow(Adw.ApplicationWindow):
 
         # Global Player Bar (Always Visible)
         from ui.player_bar import PlayerBar
-        from ui.pages.playlist import PlaylistPage
-        from ui.pages.artist import ArtistPage
 
         # Player already inited above
         self.player_bar = PlayerBar(
@@ -208,6 +208,15 @@ class MainWindow(Adw.ApplicationWindow):
         self.view_switcher_bar.set_visible(False)
         self.root_content_view.add_bottom_bar(self.view_switcher_bar)
 
+        # Tab Re-click Gesture Setup
+        self.switcher_click = Gtk.GestureClick()
+        self.switcher_click.connect("pressed", self.on_switcher_reclick)
+        self.switcher.add_controller(self.switcher_click)
+
+        self.mobile_switcher_click = Gtk.GestureClick()
+        self.mobile_switcher_click.connect("pressed", self.on_switcher_reclick)
+        self.view_switcher_bar.add_controller(self.mobile_switcher_click)
+
         from ui.expanded_player import ExpandedPlayer
 
         # Initialize your ExpandedPlayer (now as a standalone Box/Widget)
@@ -231,35 +240,52 @@ class MainWindow(Adw.ApplicationWindow):
         # Initialize Pages (Must be before breakpoint)
         self.init_pages()
 
-        # Responsive Breakpoint
-        breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 750px"))
-        breakpoint.add_setter(self.view_switcher_bar, "reveal", True)
-        breakpoint.add_setter(self.view_switcher_bar, "visible", True)
-        breakpoint.add_setter(self.split_view, "collapsed", True)
+        # 6. Responsive Breakpoints
+        
+        # COLLAPSE SIDERBAR (< 750px)
+        collapse_breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 750px"))
+        collapse_breakpoint.add_setter(self.split_view, "collapsed", True)
+        self.add_breakpoint(collapse_breakpoint)
 
-        # Compact Mode for Player Bar
-        breakpoint.connect("apply", self._on_mobile_breakpoint_apply)
-        breakpoint.connect("unapply", self._on_mobile_breakpoint_unapply)
-        self.add_breakpoint(breakpoint)
+        # MOBILE UI (< 500px)
+        mobile_breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 500px"))
+        mobile_breakpoint.add_setter(self.view_switcher_bar, "reveal", True)
+        mobile_breakpoint.add_setter(self.view_switcher_bar, "visible", True)
+        mobile_breakpoint.connect("apply", self._on_mobile_breakpoint_apply)
+        mobile_breakpoint.connect("unapply", self._on_mobile_breakpoint_unapply)
+        self.add_breakpoint(mobile_breakpoint)
 
     def add_toast(self, message):
         toast = Adw.Toast.new(message)
         self.toast_overlay.add_toast(toast)
 
-    def _get_active_playlist_page(self):
-        # Helper to find if visible view is a Playlist Page
+    def _get_active_responsive_child(self):
+        # Helper to find if visible view has responsive features (compact mode)
         nav = self.view_stack.get_visible_child()
         if isinstance(nav, Adw.NavigationView):
-            # Get visible page
             page = nav.get_visible_page()
-            # Check child
             if page:
-                child = page.get_child()  # ToolbarView
+                child = page.get_child()
                 if isinstance(child, Adw.ToolbarView):
                     content = child.get_content()
                     if hasattr(content, "set_compact_mode"):
                         return content
                 elif hasattr(child, "set_compact_mode"):
+                    return child
+        return None
+
+    def _get_active_filterable_child(self):
+        # Helper to find if currently visible child supports search filtering (Playlist, Album)
+        active_nav = self.view_stack.get_visible_child()
+        if isinstance(active_nav, Adw.NavigationView):
+            nav_page = active_nav.get_visible_page()
+            if nav_page:
+                child = nav_page.get_child()
+                if isinstance(child, Adw.ToolbarView):
+                    content = child.get_content()
+                    if hasattr(content, "filter_content"):
+                        return content
+                elif hasattr(child, "filter_content"):
                     return child
         return None
 
@@ -269,7 +295,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._is_compact = True
         self.player_bar.set_compact(True)
         self.expanded_player.set_compact_mode(True)
-        page = self._get_active_playlist_page()
+        page = self._get_active_responsive_child()
         if page:
             page.set_compact_mode(True)
 
@@ -287,7 +313,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._is_compact = False
         self.player_bar.set_compact(False)
         self.expanded_player.set_compact_mode(False)
-        page = self._get_active_playlist_page()
+        page = self._get_active_responsive_child()
         if page:
             page.set_compact_mode(False)
 
@@ -303,6 +329,23 @@ class MainWindow(Adw.ApplicationWindow):
             self.main_stack.set_visible_child_name("player")
             self.back_btn.set_visible(True)
             self.update_back_button_visibility()
+
+    def on_switcher_reclick(self, gesture, n_press, x, y):
+        # We want to detect if the user clicked the ALREADY active tab.
+        # Adw.ViewSwitcher doesn't tell us which button was clicked easily.
+        # But we can check if the visible child remains the same after a short delay.
+        old_name = self.view_stack.get_visible_child_name()
+
+        def check_reclick():
+            new_name = self.view_stack.get_visible_child_name()
+            if old_name == new_name:
+                # Same tab clicked! Reset it to root.
+                nav = self._get_active_nav_view()
+                if nav:
+                    nav.pop_to_tag("root")
+            return False
+
+        GLib.timeout_add(100, check_reclick)
 
     def _on_player_dismissed(self, player):
         """Called when the player is dismissed (tapped back on desktop or swiped down on mobile)."""
@@ -482,7 +525,6 @@ class MainWindow(Adw.ApplicationWindow):
 
             # Connect to page changes to update Back Button
             nav_view.connect("notify::visible-page", self.update_back_button_visibility)
-            nav_view.connect("notify::visible-page", self.update_back_button_visibility)
 
             return nav_view
 
@@ -536,71 +578,80 @@ class MainWindow(Adw.ApplicationWindow):
             # We stored page instances in init_pages, so direct traversal is not needed for Search/Library.
             pass
         return None
+    def on_window_key_pressed(self, controller, keyval, keycode, state):
+        # Handle Escape key for Back / Close Search
+        if keyval == Gdk.KEY_Escape:
+            if self.search_bar.get_search_mode():
+                # Manually close it and stop propagation
+                self.search_bar.set_search_mode(False)
+                # Clear focus from entry to ensure next keys are handled by the window
+                self.grab_focus()
+                return True
+            
+            if self.back_btn.get_visible():
+                self.on_back_clicked(None)
+                return True
+            return False
 
-    def on_window_key_released(self, controller, keyval, keycode, state):
-        # Allow type-to-search from anywhere
-        # Check if focus is already in an entry
+        # Redirection logic for Global Search (Alphanumeric characters)
+        # 1. Ignore if focus is in an entry
         focus = self.get_focus()
         if isinstance(focus, (Gtk.Entry, Gtk.SearchEntry, Gtk.TextView, Gtk.Editable)):
             return False
 
-        # Get Unicode character
+        # 2. DECIDE if it's a searchable character
         uni = Gdk.keyval_to_unicode(keyval)
         if uni == 0:
             return False
-
         char = chr(uni)
         if not char.isprintable():
             return False
-
-        # Ignore control keys
-        mask = state & (
-            Gdk.ModifierType.CONTROL_MASK
-            | Gdk.ModifierType.ALT_MASK
-            | Gdk.ModifierType.META_MASK
-        )
+        
+        # 3. Ignore control/alt/meta keys
+        mask = state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.META_MASK)
         if mask:
             return False
 
-        # Switch to Search Page AND Reveal Bar
-        self.search_bar.set_search_mode(True)
-
-        # Only switch page if NOT in a playlist (Context-Aware)
-        playlist_page = self._get_active_playlist_page()
-
-        if not playlist_page:
-            self.view_stack.set_visible_child_name("search")
-            # Reset search view to root
+        # 4. Context-Aware Redirection: If NOT in a filterable playlist, switch tab first
+        if not self._get_active_filterable_child():
+            if self.view_stack.get_visible_child_name() != "search":
+                # Ensure we switch tab before SearchBar captures the character
+                self.view_stack.set_visible_child_name("search")
+            
+            # Ensure search tab is at root (results view)
             nav = self.view_stack.get_child_by_name("search")
             if isinstance(nav, Adw.NavigationView):
-                nav.pop_to_tag("root")
+                root_page = nav.get_visible_page()
+                if root_page and nav.get_previous_page(root_page):
+                    nav.pop_to_tag("root")
+            
+            # Manually trigger search mode and insert the character
+            # This avoids the "ignored first character" bug during tab switches
+            self.search_bar.set_search_mode(True)
+            self.search_entry.grab_focus()
+            self.search_entry.set_text(char)
+            self.search_entry.set_position(-1) # Move cursor to end
+            return True
 
-        # Forward event to search entry manually if needed,
-        # but GtkSearchBar's key capture widget usually handles it.
-        # If we return False (propagate), SearchBar sees it.
-        # Let's ensure focus.
-        self.search_entry.grab_focus()
-
-        # Append logic is usually handled by Capture Widget automatically?
-        # If we return False, it bubbles to MainWindow -> captured by SearchBar.
+        # Let the event propagate so GtkSearchBar can capture it
         return False
 
     def on_global_search_changed(self, entry):
         text = entry.get_text()
 
-        # Context-Aware Search Logic
-        playlist_page = self._get_active_playlist_page()
-        if playlist_page:
-            # Filter Playlist Content
-            if hasattr(playlist_page, "filter_content"):
-                playlist_page.filter_content(text)
+        # Context-Aware Search Logic (Double check redirection here too)
+        filterable_child = self._get_active_filterable_child()
+        if filterable_child:
+            filterable_child.filter_content(text)
         else:
-            # Global Search: Switch to Explore Tab if not already there
+            # Global Search Redirection (Safety fallback)
             if self.view_stack.get_visible_child_name() != "search":
-                self.view_stack.set_visible_child_name("search")
-                # Reset search view to root
-                nav = self.view_stack.get_child_by_name("search")
-                if isinstance(nav, Adw.NavigationView):
+                GLib.idle_add(self.view_stack.set_visible_child_name, "search")
+            
+            nav = self.view_stack.get_child_by_name("search")
+            if isinstance(nav, Adw.NavigationView):
+                root_page = nav.get_visible_page()
+                if root_page and nav.get_previous_page(root_page):
                     nav.pop_to_tag("root")
 
             if hasattr(self, "search_page"):
@@ -608,10 +659,12 @@ class MainWindow(Adw.ApplicationWindow):
 
     def on_search_stop(self, entry):
         self.search_bar.set_search_mode(False)
-        # Clear filter if we were filtering?
-        playlist_page = self._get_active_playlist_page()
-        if playlist_page and hasattr(playlist_page, "filter_content"):
-            playlist_page.filter_content("")
+        # Crucial: Clear focus so the next Esc goes to the Window Controller
+        self.grab_focus()
+        
+        filterable_child = self._get_active_filterable_child()
+        if filterable_child:
+            filterable_child.filter_content("")
 
     def on_search_mode_changed(self, search_bar, param):
         mode = search_bar.get_search_mode()
@@ -621,12 +674,18 @@ class MainWindow(Adw.ApplicationWindow):
             self.search_entry.grab_focus()
 
             # If we are NOT in a playlist, switch to Explore tab
-            if not self._get_active_playlist_page():
-                self.view_stack.set_visible_child_name("search")
+            filterable = self._get_active_filterable_child()
+            if not filterable:
+                if self.view_stack.get_visible_child_name() != "search":
+                    # Use idle_add to avoid issues with current signal processing
+                    GLib.idle_add(self.view_stack.set_visible_child_name, "search")
+                
                 # Reset search view to root
                 nav = self.view_stack.get_child_by_name("search")
                 if isinstance(nav, Adw.NavigationView):
-                    nav.pop_to_tag("root")
+                    root_page = nav.get_visible_page()
+                    if root_page and nav.get_previous_page(root_page):
+                        nav.pop_to_tag("root")
 
     # on_search_btn_clicked removed (replaced by binding)
 
@@ -666,13 +725,16 @@ class MainWindow(Adw.ApplicationWindow):
             "header-title-changed", self.on_playlist_header_title_changed
         )
 
-        # Check if we are in mobile mode (compact) - Force true if width < 650
+        # Check if we are in mobile mode (compact) - Force true if width < 500
         # self.view_switcher_bar.get_reveal() might be delayed?
         width = self.get_width()
-        if width < 650:
+        if width < 500:
             playlist_page.set_compact_mode(True)
         elif hasattr(self, "view_switcher_bar") and self.view_switcher_bar.get_reveal():
             playlist_page.set_compact_mode(True)
+        
+        # Connect tab re-click logic if not already done?
+        # (This is handled globally in init_pages now)
 
         # Note: We don't need to manually update window title or back button.
         # Adw.NavigationView handles the transition.
@@ -923,6 +985,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.library_page.load_library()
 
     def _on_mobile_breakpoint_apply(self, *args):
+        print(f"[DEBUG-UI] Mobile breakpoint apply. Width: {self.get_width()}")
         self._is_compact = True
         
         # Hide tabs, show title
@@ -946,6 +1009,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.bottom_sheet.set_sheet(self.expanded_player)
 
     def _on_mobile_breakpoint_unapply(self, *args):
+        print(f"[DEBUG-UI] Mobile breakpoint unapply. Width: {self.get_width()}")
         self._is_compact = False
         
         # Show tabs, hide title
@@ -963,7 +1027,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._sync_page_compact()
         # Restore desktop state
         if hasattr(self, "split_view"):
-            self.split_view.set_show_sidebar(self._sidebar_explicitly_opened)
+            GLib.idle_add(self._restore_sidebar_state)
 
         # Dynamic Reparenting back to Stack for Desktop
         if hasattr(self, "expanded_player"):
@@ -971,6 +1035,14 @@ class MainWindow(Adw.ApplicationWindow):
             parent = self.expanded_player.get_parent()
             if parent != self.main_stack:
                 self.main_stack.add_named(self.expanded_player, "player")
+
+    def _restore_sidebar_state(self):
+        if hasattr(self, "split_view"):
+            has_queue = len(self.player.queue) > 0
+            show = self._sidebar_explicitly_opened and has_queue
+            print(f"[DEBUG-UI] _restore_sidebar_state: show={show}, explicitly_opened={self._sidebar_explicitly_opened}, has_queue={has_queue}, collapsed={self.split_view.get_collapsed()}")
+            self.split_view.set_show_sidebar(show)
+        return False # Run once
 
     def _sync_page_compact(self):
         # Notify current pages
@@ -995,26 +1067,47 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_sidebar_visibility_changed(self, split_view, param):
         is_visible = split_view.get_show_sidebar()
+        print(f"[DEBUG-UI] Sidebar visibility changed: {is_visible}")
         if hasattr(self, "player_bar"):
             self.player_bar.set_queue_active(is_visible)
 
     def _on_player_bar_visibility(self, player, *args):
         has_queue = len(self.player.queue) > 0
         self.player_bar_revealer.set_reveal_child(has_queue)
+        
+        # Also close sidebar if queue becomes empty
+        if not has_queue and hasattr(self, "split_view"):
+            if self.split_view.get_show_sidebar():
+                print("[DEBUG-UI] Closing sidebar because queue is empty")
+                self.split_view.set_show_sidebar(False)
+                # Should we reset _sidebar_explicitly_opened? 
+                # Probably yes, as the "context" is gone.
+                self._sidebar_explicitly_opened = False
 
     def _on_split_view_collapsed(self, split_view, param):
-        pass
+        collapsed = split_view.get_collapsed()
+        print(f"[DEBUG-UI] _on_split_view_collapsed: {collapsed}")
+        if not collapsed:
+            # When uncollapsing (going back to desktop), force the state
+            GLib.idle_add(self._restore_sidebar_state)
 
     def toggle_queue(self):
         """Toggles the visibility of the Queue Sidebar."""
         if hasattr(self, "split_view"):
             current = self.split_view.get_show_sidebar()
             new_state = not current
+            print(f"[DEBUG-UI] toggle_queue. Current={current}, New={new_state}, Has queue={len(self.player.queue) > 0}")
+            
+            if new_state and not self.player.queue:
+                print(f"[DEBUG-UI] toggle_queue: Refusing to open empty queue")
+                return False
+                
             self.split_view.set_show_sidebar(new_state)
             
             # Persist state only when not collapsed (desktop view)
             # or if explicitly toggled in mobile overlay
             self._sidebar_explicitly_opened = new_state
+            print(f"[DEBUG-UI] sidebar_explicitly_opened set to: {self._sidebar_explicitly_opened}")
 
         # Refresh explore/search
         if hasattr(self, "search_page"):

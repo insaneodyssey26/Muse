@@ -37,16 +37,19 @@ def cache_pixbuf(url, pixbuf):
 
 def get_high_res_url(url, target_size=None):
     """Rewrites Google Image URLs to request a high resolution (800x800).
-    Also strips sqp and rs parameters which constrain resolution.
+    Also strips sqp and rs parameters which constrain resolution, UNLESS it's a locker track.
     """
     if not url:
         return url
 
     # 1. Clean up parameters that constrain resolution
     # Strip sqp and rs which are often used to force small/safe thumbnails
-    # The regex handles ?sqp=..., &sqp=..., and trailing separators
-    clean_url = re.sub(r"([?&])(sqp|rs)=[^&]*&?", r"\1", url)
-    clean_url = clean_url.replace("?&", "?").rstrip("?&")
+    # CRITICAL: Locker track thumbnails (vi_locker) REQUIRE the rs parameter.
+    if "vi_locker" not in url:
+        clean_url = re.sub(r"([?&])(sqp|rs)=[^&]*&?", r"\1", url)
+        clean_url = clean_url.replace("?&", "?").rstrip("?&")
+    else:
+        clean_url = url
 
     # 2. Upgrade resolution/quality based on domain
     if "i.ytimg.com" in clean_url:
@@ -276,8 +279,20 @@ class AsyncImage(Gtk.Image):
             pixbuf = cached_pixbuf
             if not pixbuf:
                 # Download image data
-                with urllib.request.urlopen(url) as response:
-                    data = response.read()
+                headers = {"User-Agent": "Mozilla/5.0"}
+                if self.player and hasattr(self.player, "client"):
+                    client = self.player.client
+                    if client and client.is_authenticated():
+                        # Use cookies for YouTube related domains to support private covers
+                        if any(d in url for d in ["youtube.com", "ytimg.com", "googleusercontent.com", "ggpht.com"]):
+                            cookie = client.api.headers.get("Cookie")
+                            if cookie:
+                                headers["Cookie"] = cookie
+
+                import requests
+                resp = requests.get(url, headers=headers, timeout=10)
+                resp.raise_for_status()
+                data = resp.content
 
                 loader = GdkPixbuf.PixbufLoader()
                 loader.write(data)
@@ -491,16 +506,24 @@ class AsyncPicture(Gtk.Picture):
 
     def _fetch_image(self, url, target_size=None, crop=False, fallbacks=None):
         try:
-            # We use MusicClient's session if possible or just requests
-            import requests
+            # Download image data
+            headers = {"User-Agent": "Mozilla/5.0"}
+            if self.player and hasattr(self.player, "client"):
+                client = self.player.client
+                if client and client.is_authenticated():
+                    # Use cookies for YouTube related domains to support private covers
+                    if any(d in url for d in ["youtube.com", "ytimg.com", "googleusercontent.com", "ggpht.com"]):
+                        cookie = client.api.headers.get("Cookie")
+                        if cookie:
+                            headers["Cookie"] = cookie
 
-            # Reuse connection if possible
-            resp = requests.get(url, timeout=10)
-            if resp.status_code != 200:
-                raise Exception(f"HTTP {resp.status_code}")
+            import requests
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            data = resp.content
 
             loader = GdkPixbuf.PixbufLoader()
-            loader.write(resp.content)
+            loader.write(data)
             loader.close()
             pixbuf = loader.get_pixbuf()
 

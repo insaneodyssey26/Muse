@@ -36,8 +36,8 @@ class PlayerBar(Gtk.Box):
 
         # 2. Main Content Area (Horizontal)
         content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        content_box.set_margin_top(0) # Absolute minimum padding
-        content_box.set_margin_bottom(6)
+        content_box.set_margin_top(8)
+        content_box.set_margin_bottom(12)
         content_box.set_margin_start(12)
         content_box.set_margin_end(12)
         self.append(content_box)
@@ -241,13 +241,16 @@ class PlayerBar(Gtk.Box):
             self.prev_btn.set_visible(False)
             self.next_btn.set_visible(False)
             self.volume_container.set_visible(False)
-            self.queue_btn.set_visible(True) # Keep it
+            self.queue_btn.set_visible(False)
+            self.scale.add_css_class("compact")
 
             # Tighten mobile layout
-            self.content_box.set_spacing(6)
-            self.controls_box.set_spacing(6)
-            self.content_box.set_margin_start(6)
-            self.content_box.set_margin_end(6)
+            self.content_box.set_margin_start(10)
+            self.content_box.set_margin_end(10)
+            self.content_box.set_margin_top(10)
+            self.content_box.set_margin_bottom(10)
+            self.content_box.set_spacing(10)
+            self.controls_box.set_spacing(10)
         else:
             self.remove_css_class("compact")
             self.timings_label.set_visible(True)
@@ -255,13 +258,16 @@ class PlayerBar(Gtk.Box):
             self.next_btn.set_visible(True)
             self.volume_container.set_visible(True)
             self.queue_btn.set_visible(True)
+            self.scale.remove_css_class("compact")
             self.like_btn.set_visible(bool(self.player.current_video_id))
 
             # Desktop layout
-            self.content_box.set_spacing(12)
-            self.controls_box.set_spacing(12)
-            self.content_box.set_margin_start(12)
-            self.content_box.set_margin_end(12)
+            self.content_box.set_margin_start(10)
+            self.content_box.set_margin_end(10)
+            self.content_box.set_margin_top(10)
+            self.content_box.set_margin_bottom(10)
+            self.content_box.set_spacing(10)
+            self.controls_box.set_spacing(10)
 
     def _on_artist_btn_clicked(self, btn):
         if self.on_artist_click:
@@ -325,23 +331,32 @@ class PlayerBar(Gtk.Box):
             color: @accent_color;
         }
         .player-scale {
-            margin-top: -6px; /* Pull closer to roof */
-            margin-bottom: 0px; 
-            min-height: 14px; /* Tighter target */
+            margin-top: -1px; /* Desktop: Align with top border */
+            margin-bottom: 2px; 
+            min-height: 4px;
             padding: 0px;
         }
+        .player-scale.compact {
+            margin-top: -4px; /* Mobile: Pull even higher to remove perceived gap */
+        }
         .player-scale trough {
-            min-height: 4px; 
-            margin-top: 8px; /* Center visual trough within 20px height */
-            margin-bottom: 8px;
+            min-height: 4px; /* Slightly thicker */
+            margin-top: 0px;
+            margin-bottom: 0px;
             padding: 0px;
         }
         .player-scale slider {
+            min-height: 0px;
+            min-width: 0px;
+            margin: 0px;
+            background-color: transparent; /* Hide slider by default */
+        }
+        .player-scale:hover slider {
             min-height: 12px;
             min-width: 12px;
-            margin: -4px; 
-            background-color: white; 
-            box-shadow: none; 
+            margin: -5px; 
+            background-color: white;
+            box-shadow: 0 0 4px rgba(0,0,0,0.3);
         }
         .player-bar-cover {
             border-radius: 6px;
