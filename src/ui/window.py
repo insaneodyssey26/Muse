@@ -255,6 +255,9 @@ class MainWindow(Adw.ApplicationWindow):
         mobile_breakpoint.connect("unapply", self._on_mobile_breakpoint_unapply)
         self.add_breakpoint(mobile_breakpoint)
 
+        # 7. Initial Checks
+        self.check_auth()
+
     def add_toast(self, message):
         toast = Adw.Toast.new(message)
         self.toast_overlay.add_toast(toast)
@@ -461,35 +464,27 @@ class MainWindow(Adw.ApplicationWindow):
         )
         app_group.add(debug_row)
 
+        from api.client import MusicClient
+        is_authed = MusicClient().is_authenticated()
+
         group = Adw.PreferencesGroup()
         group.set_title("Account")
         page.add(group)
 
         # Sign Out Row
         row = Adw.ActionRow()
-        row.set_title("Sign Out")
-        row.set_subtitle("Remove saved credentials and log out of YouTube Music")
-        # Controls
-        # The instruction mentioned "PlayerBar controls" but the snippet was in show_preferences.
-        # Assuming this was a misplacement and the user intended to add a Gtk.Box for layout
-        # within the preferences dialog, but it's not directly related to PlayerBar.
-        # The original code did not have this controls_box. I will add it as per the snippet,
-        # but it seems to be an incomplete thought in the provided diff.
-        # For now, I'll just add the box and the spacing change as requested,
-        # assuming it's meant to wrap the logout_btn, even if the snippet doesn't show it fully.
-        # However, the snippet shows `logout_btn.add_css_class(...)` and `row.add_suffix(logout_btn)`
-        # *after* the `controls_box` definition, implying `controls_box` is not used for `logout_btn`.
-        # Given the instruction "Reduce spacing in PlayerBar controls" and the snippet's context,
-        # I will only apply the import changes and leave the `show_preferences` method as is,
-        # as the provided snippet for that section is syntactically incorrect and contextually
-        # confusing regarding the instruction.
-        # If the user meant to modify PlayerBar, that class is in ui/player_bar.py, not here.
-        # I will only apply the import changes as they are clear and correct.
+        row.set_title("Sign Out" if is_authed else "Sign In")
+        row.set_subtitle("Remove saved credentials and log out of YouTube Music" if is_authed else "Sign in to YouTube Music to access your library")
 
-        logout_btn = Gtk.Button(label="Sign Out")
+        logout_btn = Gtk.Button(label="Sign Out" if is_authed else "Sign In")
         logout_btn.set_valign(Gtk.Align.CENTER)
-        logout_btn.add_css_class("destructive-action")
-        logout_btn.connect("clicked", self.on_logout_clicked, prefs)
+        
+        if is_authed:
+            logout_btn.add_css_class("destructive-action")
+            logout_btn.connect("clicked", self.on_logout_clicked, prefs)
+        else:
+            logout_btn.add_css_class("suggested-action")
+            logout_btn.connect("clicked", lambda b, p: (p.close(), self.check_auth()), prefs)
 
         row.add_suffix(logout_btn)
         group.add(row)
