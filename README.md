@@ -22,7 +22,13 @@ A modern, Linux-first YouTube Music player.
 
 Thank you for all of your positive feedback on Mixtapes, I appreciate it a lot!
 
-<iframe style="width:100%;height:auto;min-width:600px;min-height:400px;" src="https://www.star-history.com/?repos=m-obeid%2FMixtapes&type=date&legend=top-left" frameBorder="0"></iframe>
+<a href="https://www.star-history.com/?repos=m-obeid%2FMixtapes&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=m-obeid/Mixtapes&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=m-obeid/Mixtapes&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=m-obeid/Mixtapes&type=date&legend=top-left" />
+ </picture>
+</a>
 
 ## Thanks to all contributors as well!
 
