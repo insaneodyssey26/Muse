@@ -18,6 +18,19 @@ A modern, Linux-first YouTube Music player.
 
 </div>
 
+## Star History
+
+Thank you for all of your positive feedback on Mixtapes, I appreciate it a lot!
+
+<iframe style="width:100%;height:auto;min-width:600px;min-height:400px;" src="https://www.star-history.com/?repos=m-obeid%2FMixtapes&type=date&legend=top-left" frameBorder="0"></iframe>
+
+## Thanks to all contributors as well!
+
+<a href = "https://github.com/m-obeid/Mixtapes/graphs/contributors">
+<img src = "https://contrib.rocks/image?repo=m-obeid/Mixtapes" width="600"/>
+</a>
+
+
 ## Roadmap
 
 This is a list of all the features that are planned for Mixtapes:
