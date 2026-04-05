@@ -36,6 +36,7 @@ jobs:
             mingw-w64-ucrt-x86_64-gst-plugins-ugly
             mingw-w64-ucrt-x86_64-glib2
             mingw-w64-ucrt-x86_64-nodejs
+            mingw-w64-ucrt-x86_64-ffmpeg
             git
 
       - name: Install Python dependencies
