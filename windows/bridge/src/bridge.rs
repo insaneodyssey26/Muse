@@ -211,6 +211,16 @@ fn main() {
         }
     };
 
+    // Set initial display info so SMTC doesn't show "Unknown app"
+    {
+        let updater = smtc.DisplayUpdater().unwrap();
+        updater.SetType(MediaPlaybackType::Music).unwrap();
+        let props = updater.MusicProperties().unwrap();
+        let _ = props.SetTitle(&windows::core::HSTRING::from("Mixtapes"));
+        let _ = props.SetArtist(&windows::core::HSTRING::from(""));
+        let _ = updater.Update();
+    }
+
     {
         let mut handle = stdout.lock();
         let _ = writeln!(handle, r#"{{"event":"smtc_ready"}}"#);

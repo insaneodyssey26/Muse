@@ -1,5 +1,3 @@
-IDI_ICON1 ICON "mixtapes.ico"
-
 1 VERSIONINFO
 FILEVERSION 1,0,0,0
 PRODUCTVERSION 1,0,0,0
@@ -12,8 +10,8 @@ BEGIN
             VALUE "ProductName", "Mixtapes"
             VALUE "FileVersion", "1.0.0"
             VALUE "CompanyName", "pocoguy"
-            VALUE "InternalName", "Mixtapes"
-            VALUE "OriginalFilename", "Mixtapes.exe"
+            VALUE "InternalName", "MixtapesBridge"
+            VALUE "OriginalFilename", "MixtapesBridge.exe"
         END
     END
     BLOCK "VarFileInfo"

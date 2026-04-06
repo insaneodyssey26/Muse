@@ -26,6 +26,19 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_title("Mixtapes")
         self._is_compact = False
 
+        # On Windows, set the window icon from the bundled .ico file
+        if sys.platform == "win32":
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            ico_path = os.path.join(project_root, "windows", "mixtapes.ico")
+            if os.path.exists(ico_path):
+                try:
+                    from gi.repository import GdkPixbuf
+                    pixbuf = GdkPixbuf.Pixbuf.new_from_file(ico_path)
+                    texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+                    self.set_icon(texture)
+                except Exception as e:
+                    print(f"Could not set window icon: {e}")
+
         # Add custom icons path relative to current file or project root
 
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
