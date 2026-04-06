@@ -16,6 +16,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use windows::Foundation::Uri;
 use windows::Media::{
     MediaPlaybackStatus, MediaPlaybackType, SystemMediaTransportControls,
@@ -264,30 +266,64 @@ fn main() {
         let _ = handle.flush();
     }
 
-    // Read commands from stdin
-    let stdin = io::stdin();
-    for line in stdin.lock().lines() {
-        match line {
-            Ok(line) => {
-                let line = line.trim().to_string();
-                if line.is_empty() {
-                    continue;
+    let smtc = Arc::new(smtc);
+    let smtc_clone = Arc::clone(&smtc);
+
+    // Read stdin on a background thread, dispatch commands to SMTC
+    let quit_flag = Arc::new(Mutex::new(false));
+    let quit_clone = Arc::clone(&quit_flag);
+
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            match line {
+                Ok(line) => {
+                    let line = line.trim().to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    match serde_json::from_str::<Command>(&line) {
+                        Ok(cmd) => {
+                            if cmd.cmd == "quit" {
+                                *quit_clone.lock().unwrap() = true;
+                                // Post a quit message to break the message loop
+                                unsafe {
+                                    windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
+                                }
+                                break;
+                            }
+                            if let Err(e) = handle_command(&smtc_clone, &cmd) {
+                                eprintln!("SMTC command error: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("JSON parse error: {}", e);
+                        }
+                    }
                 }
-                match serde_json::from_str::<Command>(&line) {
-                    Ok(cmd) => {
-                        if cmd.cmd == "quit" {
-                            break;
-                        }
-                        if let Err(e) = handle_command(&smtc, &cmd) {
-                            eprintln!("SMTC command error: {}", e);
-                        }
+                Err(_) => {
+                    // stdin closed — parent process died
+                    unsafe {
+                        windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
                     }
-                    Err(e) => {
-                        eprintln!("JSON parse error: {}", e);
-                    }
+                    break;
                 }
             }
-            Err(_) => break,
+        }
+    });
+
+    // Run Windows message pump on main thread (required for SMTC events)
+    unsafe {
+        let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = std::mem::zeroed();
+        while windows_sys::Win32::UI::WindowsAndMessaging::GetMessageW(
+            &mut msg,
+            std::ptr::null_mut(),
+            0,
+            0,
+        ) > 0
+        {
+            windows_sys::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
+            windows_sys::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
         }
     }
 
