@@ -8,6 +8,7 @@ import os
 import json
 import subprocess
 import threading
+import atexit
 
 if sys.platform != "win32":
     raise ImportError("smtc is Windows-only")
@@ -54,6 +55,7 @@ class SMTCAdapter:
             )
             self._reader_thread = threading.Thread(target=self._read_events, daemon=True)
             self._reader_thread.start()
+            atexit.register(self.shutdown)
             print(f"SMTC: Bridge started (pid={self._proc.pid})")
         except Exception as e:
             print(f"SMTC: Failed to start bridge: {e}")

@@ -14,6 +14,8 @@ A modern, Linux-first YouTube Music player built with GTK4 and Libadwaita.
 [![GitHub issues](https://img.shields.io/github/issues/m-obeid/Mixtapes)](https://github.com/m-obeid/Mixtapes/issues)
 [![AUR](https://img.shields.io/aur/version/mixtapes-git)](https://aur.archlinux.org/packages/mixtapes-git)
 [![Flatpak CI](https://img.shields.io/github/actions/workflow/status/m-obeid/Mixtapes/build-flatpak.yml?label=Flatpak%20Build)](https://github.com/m-obeid/Mixtapes/actions/workflows/build-flatpak.yml)
+[![Windows Build](https://img.shields.io/github/actions/workflow/status/m-obeid/Mixtapes/build-windows.yml?label=Windows%20Build)](https://github.com/m-obeid/Mixtapes/actions/workflows/build-windows.yml)
+[![Windows Download](https://img.shields.io/badge/Windows-Download%20Installer-blue?logo=windows)](https://nightly.link/m-obeid/Mixtapes/workflows/build-windows/microslop-experiment/mixtapes-windows-x86_64-setup.zip)
 
 <br clear="both"/>
 
@@ -51,9 +53,10 @@ A modern, Linux-first YouTube Music player built with GTK4 and Libadwaita.
 - **Search & Discovery** -- New releases, moods & moments, genres, trending, and charts
 - **Full Playback Control** -- Play/pause, seeking, queue management, shuffle, repeat modes
 - **Downloads** -- Download tracks for offline playback as local files
-- **MPRIS Support** -- Control playback from system media controls
+- **MPRIS Support** -- Control playback from system media controls (Linux)
+- **Windows SMTC** -- System media transport controls integration (Windows)
 - **Radio & Mixes** -- Start a radio station from any song or artist
-- **Background Playback** -- Music keeps playing when the window is closed
+- **Background Playback** -- Music keeps playing when the window is closed (system tray on Windows)
 - **Playlist Editing** -- Reorder, multi-select edit, change covers, visibility, and metadata
 - **Caching** -- Cached data for snappy performance
 - **Responsive UI** -- Adaptive layout built with Libadwaita
@@ -86,6 +89,18 @@ flatpak install --user ./Mixtapes-x86_64.flatpak
 Both `x86_64` and `aarch64` builds are available.
 
 </details>
+
+### Windows (Experimental)
+
+Download and run the installer: **[MixtapesSetup.exe](https://nightly.link/m-obeid/Mixtapes/workflows/build-windows/microslop-experiment/mixtapes-windows-x86_64-setup.zip)**
+
+A portable (no-install) ZIP is also available from [GitHub Actions](https://github.com/m-obeid/Mixtapes/actions/workflows/build-windows.yml).
+
+> [!NOTE]
+> The Windows build is experimental. Known limitations:
+> - No embedded WebKit login -- use the bundled Login Helper (`MixtapesLogin.exe`) or `ytmusicapi browser`
+> - SMTC (media controls) works but may show "Unknown app" without the installer
+> - Font rendering differs from Linux
 
 ### AUR (Arch Linux)
 
@@ -140,6 +155,48 @@ pip install -r requirements.txt
 ```
 
 <details>
+<summary>Build on Windows (from source)</summary>
+
+Requires [MSYS2](https://www.msys2.org/) with the UCRT64 environment:
+
+```bash
+# In MSYS2 UCRT64 terminal:
+pacman -S mingw-w64-ucrt-x86_64-gtk4 mingw-w64-ucrt-x86_64-libadwaita \
+  mingw-w64-ucrt-x86_64-python mingw-w64-ucrt-x86_64-python-pip \
+  mingw-w64-ucrt-x86_64-python-gobject mingw-w64-ucrt-x86_64-gstreamer \
+  mingw-w64-ucrt-x86_64-gst-plugins-base mingw-w64-ucrt-x86_64-gst-plugins-good \
+  mingw-w64-ucrt-x86_64-gst-plugins-bad mingw-w64-ucrt-x86_64-gst-plugins-ugly \
+  mingw-w64-ucrt-x86_64-glib2 mingw-w64-ucrt-x86_64-nodejs \
+  mingw-w64-ucrt-x86_64-ffmpeg mingw-w64-ucrt-x86_64-python-pillow git
+
+git clone https://github.com/m-obeid/Mixtapes.git && cd Mixtapes
+pip install --break-system-packages -r requirements-windows.txt
+pip install --break-system-packages pystray
+
+# Compile GResources and run:
+glib-compile-resources --sourcedir=. src/muse.gresource.xml --target=src/muse.gresource
+python src/main.py
+```
+
+**SMTC bridge** (optional, for Windows media controls):
+```bash
+# In a regular PowerShell/CMD (not MSYS2), with Rust installed:
+cd windows/bridge
+cargo build --release
+# Copy target/release/MixtapesBridge.exe to windows/ in the app directory
+```
+
+**Login helper** (optional, for browser-based login):
+```bash
+# In a regular PowerShell/CMD with Python 3.12:
+pip install pywebview pyinstaller
+pyinstaller --onefile --noconsole --name MixtapesLogin windows/login_helper.py
+# Copy dist/MixtapesLogin.exe to windows/ in the app directory
+```
+
+</details>
+
+<details>
 <summary>Build with flatpak-builder</summary>
 
 ```bash
@@ -153,19 +210,21 @@ flatpak run com.pocoguy.Muse
 
 ### Prerequisites
 
-| Dependency | Purpose |
-|---|---|
-| Python 3.10+ | Core runtime |
-| Node.js | Required for yt-dlp-ejs (fixes playback issues) |
-| GTK4 + dev headers | UI toolkit |
-| Libadwaita + dev headers | GNOME UI components |
-| WebKitGTK 6.0 + dev headers | Embedded browser for auth |
-| GStreamer plugins (base, good, bad, ugly) | Audio playback |
+| Dependency | Purpose | Windows |
+|---|---|---|
+| Python 3.10+ | Core runtime | via MSYS2 |
+| Node.js | Required for yt-dlp-ejs (fixes playback issues) | via MSYS2 |
+| GTK4 + dev headers | UI toolkit | via MSYS2 |
+| Libadwaita + dev headers | GNOME UI components | via MSYS2 |
+| WebKitGTK 6.0 + dev headers | Embedded browser for auth | N/A (uses Login Helper) |
+| GStreamer plugins (base, good, bad, ugly) | Audio playback | via MSYS2 |
+| ffmpeg | Audio muxing for downloads | via MSYS2 |
 
 ## Authentication
 
 > [!TIP]
-> You can authenticate directly in the app using the built-in WebKit browser -- no manual setup needed!
+> **Linux:** You can authenticate directly in the app using the built-in WebKit browser -- no manual setup needed!
+> **Windows:** Use the bundled Login Helper (Start Menu > Mixtapes > Login Helper) to sign in via Edge WebView2.
 
 <details>
 <summary>Manual authentication (legacy)</summary>
@@ -216,7 +275,8 @@ Without a `browser.json` file, the app falls back to the unauthenticated API, wh
 | 🔜 | **Cover Art Tint** | Tint Libadwaita to match cover art, kinda like Material You |
 | 🔜 | **Discord RPC** | Show your current track on Discord |
 | 🔜 | **Lyrics** | Synchronized lyrics, maybe using BetterLyrics API |
-| 🔜 | **Windows/macOS** | Requires quite a bit of tinkering, not highest priority |
+| ✅️ | **Windows** | ✅️ GTK4/Libadwaita via MSYS2<br>✅️ GStreamer playback<br>✅️ SMTC media controls<br>✅️ System tray<br>✅️ Installer<br>✅️ Login helper (Edge WebView2) |
+| ❎️ | **macOS** | Unlikely that I will get hands on a Mac anytime soon, so for now won't happen. Technically it's possible to build it for macOS, but I don't have a Mac to test it on. |
 | 🔜 | **GNOME Circle** | Still considering it, might not happen |
 
 Have an idea or found a bug? [Open an issue!](https://github.com/m-obeid/Mixtapes/issues)
