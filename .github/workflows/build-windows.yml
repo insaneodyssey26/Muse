@@ -46,6 +46,10 @@ jobs:
         run: |
           pip install --no-build-isolation --break-system-packages -r requirements-windows.txt
           pip install --no-build-isolation --break-system-packages pystray
+          pip install --no-build-isolation --break-system-packages winrt-Windows.Media winrt-Windows.Media.Playback winrt-Windows.Storage.Streams winrt-Windows.Foundation
+          # Install pywebview without pythonnet (use Edge WebView2 backend instead)
+          pip install --no-build-isolation --break-system-packages --no-deps pywebview
+          pip install --no-build-isolation --break-system-packages proxy_tools bottle webview2
 
       - name: Download Adwaita Sans font
         run: |
