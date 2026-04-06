@@ -18,6 +18,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Build login helper (native Windows Python)
+        shell: pwsh
+        run: |
+          pip install pywebview pyinstaller
+          pyinstaller --onefile --noconsole --name MixtapesLogin --icon windows/mixtapes.ico windows/login_helper.py 2>&1
+          if (!(Test-Path "dist/MixtapesLogin.exe")) {
+            # Icon may not exist yet at this point, retry without icon
+            pyinstaller --onefile --noconsole --name MixtapesLogin windows/login_helper.py
+          }
+          Write-Host "Login helper built:"
+          Get-ChildItem dist/MixtapesLogin.exe
+
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
         with:
@@ -54,11 +66,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path windows/fonts
           Invoke-WebRequest -Uri "https://gitlab.gnome.org/api/v4/projects/GNOME%2Fadwaita-fonts/repository/files/sans%2FAdwaitaSans-Regular.ttf/raw?ref=main" -OutFile "windows/fonts/AdwaitaSans-Regular.ttf"
-          Invoke-WebRequest -Uri "https://gitlab.gnome.org/api/v4/projects/GNOME%2Fadwaita-fonts/repository/files/sans%2FAdwaitaSans-Bold.ttf/raw?ref=main" -OutFile "windows/fonts/AdwaitaSans-Bold.ttf"
           Get-ChildItem windows/fonts/
-          # Verify they're actual font files, not HTML
           $size = (Get-Item "windows/fonts/AdwaitaSans-Regular.ttf").Length
-          Write-Host "Regular font size: $size bytes"
+          Write-Host "Font size: $size bytes (variable font, includes all weights)"
           if ($size -lt 10000) { throw "Font file too small - likely not a real font" }
 
       - name: Generate icon and compile launcher
@@ -120,11 +130,12 @@ jobs:
           # Copy assets
           cp -r assets dist/mixtapes/
 
-          # Copy .exe launcher and icon
+          # Copy .exe launcher, login helper, and icon
           cp windows/Mixtapes.exe dist/mixtapes/
-          cp windows/mixtapes.ico dist/mixtapes/windows/mixtapes.ico 2>/dev/null || true
           mkdir -p dist/mixtapes/windows
           cp windows/mixtapes.ico dist/mixtapes/windows/
+          # Login helper was built by native Python outside MSYS2
+          cp dist/MixtapesLogin.exe dist/mixtapes/ 2>/dev/null || true
 
           # Copy fonts
           mkdir -p dist/mixtapes/share/fonts

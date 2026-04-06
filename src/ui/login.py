@@ -157,7 +157,7 @@ class LoginDialog(Adw.Window):
     def _build_windows_login_page(self):
         page = Adw.StatusPage()
         page.set_title("Quick Login")
-        page.set_description("Sign in via your browser, then import credentials.")
+        page.set_description("Sign in via a login window powered by Edge WebView2.")
         page.set_icon_name("web-browser-symbolic")
 
         clamp = Adw.Clamp()
@@ -167,22 +167,18 @@ class LoginDialog(Adw.Window):
 
         lbl = Gtk.Label()
         lbl.set_wrap(True)
-        lbl.set_justify(Gtk.Justification.LEFT)
         lbl.set_markup(
-            "<span size='large'><b>Step 1:</b> Click below to open YouTube Music login.</span>\n\n"
-            "<span size='large'><b>Step 2:</b> Sign in with your Google account.</span>\n\n"
-            "<span size='large'><b>Step 3:</b> Run <tt>ytmusicapi browser</tt> in a terminal,\n"
-            "paste headers, then click 'Import browser.json' on the Browser Login tab.</span>"
+            "Click below to open a login window.\n"
+            "Sign in with your Google account and wait for it to close automatically."
         )
-        lbl.set_xalign(0)
         box.append(lbl)
 
-        btn = Gtk.Button(label="Open YouTube Music Login")
-        btn.set_halign(Gtk.Align.CENTER)
-        btn.add_css_class("pill")
-        btn.add_css_class("suggested-action")
-        btn.connect("clicked", self._on_open_browser_login)
-        box.append(btn)
+        self.win_login_btn = Gtk.Button(label="Open Login Window")
+        self.win_login_btn.set_halign(Gtk.Align.CENTER)
+        self.win_login_btn.add_css_class("pill")
+        self.win_login_btn.add_css_class("suggested-action")
+        self.win_login_btn.connect("clicked", self._on_open_login_helper)
+        box.append(self.win_login_btn)
 
         self.win_login_status = Gtk.Label(label="")
         box.append(self.win_login_status)
@@ -191,13 +187,37 @@ class LoginDialog(Adw.Window):
         page.set_child(clamp)
         return page
 
-    def _on_open_browser_login(self, btn):
-        from ui.login_webview_win import open_ytmusic_login
-        open_ytmusic_login()
+    def _on_open_login_helper(self, btn):
+        from gi.repository import GLib
+        from ui.login_webview_win import launch_login
+
+        self.win_login_btn.set_sensitive(False)
         self.win_login_status.set_markup(
-            "<span color='blue'>Browser opened. After signing in, use the "
-            "'Browser Login' tab to import credentials.</span>"
+            "<span color='blue'>Login window opened. Sign in and wait...</span>"
         )
+
+        def on_complete(headers_json, error):
+            GLib.idle_add(self._on_login_helper_result, headers_json, error)
+
+        launch_login(on_complete)
+
+    def _on_login_helper_result(self, headers_json, error):
+        self.win_login_btn.set_sensitive(True)
+        if error:
+            self.win_login_status.set_markup(
+                f"<span color='red'>{error}</span>"
+            )
+            return
+        client = MusicClient()
+        if client.login(headers_json):
+            self.win_login_status.set_markup(
+                "<span color='green'>Login Successful!</span>"
+            )
+            self.close()
+        else:
+            self.win_login_status.set_markup(
+                "<span color='red'>Login failed. Try again or use another method.</span>"
+            )
 
     def on_webkit_login_finished(self, view, success, headers_json):
         if success:
