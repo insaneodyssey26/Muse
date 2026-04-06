@@ -18,8 +18,8 @@ def find_login_helper():
     """Find MixtapesLogin.exe relative to the app."""
     base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     candidates = [
-        os.path.join(base, "MixtapesLogin.exe"),
         os.path.join(base, "windows", "MixtapesLogin.exe"),
+        os.path.join(base, "MixtapesLogin.exe"),
     ]
     for c in candidates:
         if os.path.exists(c):

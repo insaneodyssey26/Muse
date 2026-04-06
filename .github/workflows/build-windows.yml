@@ -18,11 +18,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Generate app icon (early, needed by other steps)
+        shell: pwsh
+        run: |
+          $svg = "assets/icons/hicolor/scalable/actions/compass2-symbolic.svg"
+          if (Test-Path "build-dir/files/share/icons/hicolor/scalable/apps/com.pocoguy.Muse.svg") {
+            $svg = "build-dir/files/share/icons/hicolor/scalable/apps/com.pocoguy.Muse.svg"
+          }
+          magick $svg -background none -resize 256x256 windows/mixtapes_256.png
+          magick windows/mixtapes_256.png `
+            "(" -clone 0 -resize 16x16 ")" `
+            "(" -clone 0 -resize 32x32 ")" `
+            "(" -clone 0 -resize 48x48 ")" `
+            "(" -clone 0 -resize 64x64 ")" `
+            "(" -clone 0 -resize 128x128 ")" `
+            "(" -clone 0 -resize 256x256 ")" `
+            -delete 0 windows/mixtapes.ico
+          Write-Host "Icon generated:"
+          Get-ChildItem windows/mixtapes.ico
+
       - name: Build login helper (native Windows Python)
         shell: pwsh
         run: |
           pip install pywebview pyinstaller
-          pyinstaller --onefile --noconsole --name MixtapesLogin windows/login_helper.py
+          pyinstaller --onefile --noconsole --name MixtapesLogin --icon windows/mixtapes.ico windows/login_helper.py
           Write-Host "Login helper built:"
           Get-ChildItem dist/MixtapesLogin.exe
 
@@ -62,22 +81,6 @@ jobs:
         run: |
           pip install --no-build-isolation --break-system-packages -r requirements-windows.txt
           pip install --no-build-isolation --break-system-packages pystray
-
-      - name: Generate app icon
-        run: |
-          SVG_ICON="build-dir/files/share/icons/hicolor/scalable/apps/com.pocoguy.Muse.svg"
-          if [ ! -f "$SVG_ICON" ]; then
-            SVG_ICON="assets/icons/hicolor/scalable/actions/compass2-symbolic.svg"
-          fi
-          magick "$SVG_ICON" -background none -resize 256x256 windows/mixtapes_256.png
-          magick windows/mixtapes_256.png \
-            \( -clone 0 -resize 16x16 \) \
-            \( -clone 0 -resize 32x32 \) \
-            \( -clone 0 -resize 48x48 \) \
-            \( -clone 0 -resize 64x64 \) \
-            \( -clone 0 -resize 128x128 \) \
-            \( -clone 0 -resize 256x256 \) \
-            -delete 0 windows/mixtapes.ico
 
       - name: Build Rust binaries (native Windows toolchain)
         shell: pwsh
@@ -122,14 +125,12 @@ jobs:
           # Copy assets
           cp -r assets dist/mixtapes/
 
-          # Copy Rust-built binaries
+          # Copy Rust launcher to root, helpers to windows/
           cp windows/bridge/target/release/Mixtapes.exe dist/mixtapes/
-          cp windows/bridge/target/release/MixtapesBridge.exe dist/mixtapes/
-
-          # Copy login helper and icon
           mkdir -p dist/mixtapes/windows
+          cp windows/bridge/target/release/MixtapesBridge.exe dist/mixtapes/windows/
           cp windows/mixtapes.ico dist/mixtapes/windows/
-          cp dist/MixtapesLogin.exe dist/mixtapes/ 2>/dev/null || true
+          cp dist/MixtapesLogin.exe dist/mixtapes/windows/ 2>/dev/null || true
 
           # Bundle Adwaita Sans font
           mkdir -p dist/mixtapes/fonts

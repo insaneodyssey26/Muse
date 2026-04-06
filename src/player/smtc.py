@@ -26,8 +26,8 @@ class SMTCAdapter:
     def _find_bridge(self):
         base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         candidates = [
-            os.path.join(base, "MixtapesBridge.exe"),
             os.path.join(base, "windows", "MixtapesBridge.exe"),
+            os.path.join(base, "MixtapesBridge.exe"),
         ]
         for c in candidates:
             if os.path.exists(c):

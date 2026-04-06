@@ -3,8 +3,14 @@ import os
 
 # On Windows, set AppUserModelID so the taskbar shows our icon, not Python's
 if sys.platform == "win32":
-    import ctypes
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelIDW("com.pocoguy.Muse")
+    try:
+        import ctypes
+        _SetAppID = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+        _SetAppID.argtypes = [ctypes.c_wchar_p]
+        _SetAppID.restype = ctypes.HRESULT
+        _SetAppID("com.pocoguy.Muse")
+    except Exception:
+        pass
 
 # On Windows, install bundled font per-user so fontconfig can find it
 if sys.platform == "win32":
