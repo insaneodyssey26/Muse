@@ -15,7 +15,7 @@ A modern, Linux-first YouTube Music player built with GTK4 and Libadwaita.
 [![AUR](https://img.shields.io/aur/version/mixtapes-git)](https://aur.archlinux.org/packages/mixtapes-git)
 [![Flatpak CI](https://img.shields.io/github/actions/workflow/status/m-obeid/Mixtapes/build-flatpak.yml?label=Flatpak%20Build)](https://github.com/m-obeid/Mixtapes/actions/workflows/build-flatpak.yml)
 [![Windows Build](https://img.shields.io/github/actions/workflow/status/m-obeid/Mixtapes/build-windows.yml?label=Windows%20Build)](https://github.com/m-obeid/Mixtapes/actions/workflows/build-windows.yml)
-[![Windows Download](https://img.shields.io/badge/Windows-Download%20Installer-blue?logo=windows)](https://nightly.link/m-obeid/Mixtapes/workflows/build-windows/microslop-experiment/mixtapes-windows-x86_64-setup.zip)
+[![Windows Download](https://img.shields.io/badge/Windows-Download%20Installer-blue?logo=windows)](https://nightly.link/m-obeid/Mixtapes/workflows/build-windows/main/mixtapes-windows-x86_64-setup.zip)
 
 <br clear="both"/>
 
@@ -92,7 +92,7 @@ Both `x86_64` and `aarch64` builds are available.
 
 ### Windows (Experimental)
 
-Download and run the installer: **[MixtapesSetup.exe](https://nightly.link/m-obeid/Mixtapes/workflows/build-windows/microslop-experiment/mixtapes-windows-x86_64-setup.zip)**
+Download and run the installer: **[MixtapesSetup.exe](https://nightly.link/m-obeid/Mixtapes/workflows/build-windows/main/mixtapes-windows-x86_64-setup.zip)**
 
 A portable (no-install) ZIP is also available from [GitHub Actions](https://github.com/m-obeid/Mixtapes/actions/workflows/build-windows.yml).
 

@@ -2,9 +2,9 @@ name: Build Windows (Experimental)
 
 on:
   push:
-    branches: [microslop-experiment]
+    branches: [main]
   pull_request:
-    branches: [microslop-experiment]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
