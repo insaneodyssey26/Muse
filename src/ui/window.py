@@ -1022,6 +1022,10 @@ class MainWindow(Adw.ApplicationWindow):
         if isinstance(focus, (Gtk.Entry, Gtk.SearchEntry, Gtk.TextView, Gtk.Editable)):
             return False
 
+        if keyval == Gdk.KEY_space:
+            self.player_bar.on_play_clicked(None)
+            return True
+
         # 2. DECIDE if it's a searchable character
         uni = Gdk.keyval_to_unicode(keyval)
         if uni == 0:
