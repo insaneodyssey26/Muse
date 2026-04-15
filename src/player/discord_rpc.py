@@ -299,7 +299,7 @@ class DiscordRPCAdapter:
         details = (title or "Unknown")[:128]
         if len(details) < 2:
             details = details + " "
-        state_text = f"by {artist}"[:128]
+        state_text = f"{artist}"[:128]
         if len(state_text) < 2:
             state_text = state_text + " "
 
@@ -308,6 +308,7 @@ class DiscordRPCAdapter:
             "state": state_text,
             "type": 2,  # LISTENING — only type Vesktop's arRPC reliably
                         # forwards for non-detectable apps.
+            "display_status_type": 1, # uses "state" for status display
         }
 
         small_image = (
