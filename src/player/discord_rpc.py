@@ -370,11 +370,16 @@ class DiscordRPCAdapter:
             "main/screenshots/omori-mixtape.png"
         )
 
+        album = track.get("album", "")
+        if isinstance(album, dict):
+            album = album.get("name", "")
+        album = str(album or "")
+
         thumb = track.get("thumb") or ""
         if thumb.startswith("http"):
             activity["assets"] = {
                 "large_image": thumb,
-                "large_text": (title or "Mixtapes")[:128] or "Mixtapes",
+                "large_text": (album or title or "Mixtapes")[:128] or "Mixtapes",
                 "small_image": small_image,
                 "small_text": "Mixtapes",
             }
