@@ -1797,9 +1797,8 @@ class PlaylistPage(Adw.Bin):
                 tracks = data.get("tracks", [])
                 if tracks:
                     print(f"Background fetch complete. Fetched {len(tracks)} tracks.")
-                    self.original_tracks = tracks
                     self.client.set_cached_playlist_tracks(self.playlist_id, tracks)
-                    GObject.idle_add(self._on_background_fetch_complete)
+                    GObject.idle_add(self._on_background_fetch_complete, tracks)
             except Exception as e:
                 print(f"Error in background fetch: {e}")
 
@@ -1809,7 +1808,9 @@ class PlaylistPage(Adw.Bin):
         thread.daemon = True
         thread.start()
 
-    def _on_background_fetch_complete(self):
+    def _on_background_fetch_complete(self, tracks=None):
+        if tracks is not None:
+            self.original_tracks = tracks
         self.is_fully_fetched = True
         self._is_background_fetching = False
 
