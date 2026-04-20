@@ -97,7 +97,7 @@ class Player(GObject.Object):
         self.player.connect("notify::volume", self._on_external_volume_change)
         self.player.connect("notify::mute", self._on_external_mute_change)
         self._internal_volume_change = False
-        self._user_volume = self.get_volume()
+        self._user_volume = None # initially set as none, and will depend on wireplumber's external volume change call to set its initial volume (from last session)
         self._track_started_at = 0.0
 
         self.current_video_id = None
@@ -1112,6 +1112,9 @@ class Player(GObject.Object):
             if message.src == self.player:
                 old, new, pending = message.parse_state_changed()
                 if new == Gst.State.PLAYING:
+                    if self._user_volume == None:
+                        self._user_volume = self.get_volume()
+
                     if abs(self.get_volume() - self._user_volume) > 0.001:
                         linear = GstAudio.StreamVolume.convert_volume(
                             GstAudio.StreamVolumeFormat.CUBIC,
@@ -1343,6 +1346,18 @@ class Player(GObject.Object):
         """Called when volume changes externally (system mixer)."""
         if self._internal_volume_change:
             return
+
+        # wireplumber is an external call, which should set the volume of last session
+        # ensure volume value from external volume change is always listened to if _user_volume is still not set
+        # just storing the value from the call, it will be used whenever
+        if self._user_volume == None:
+            linear = float(element.get_property("volume"))
+            self._user_volume = GstAudio.StreamVolume.convert_volume(
+                GstAudio.StreamVolumeFormat.LINEAR,
+                GstAudio.StreamVolumeFormat.CUBIC,
+                linear,
+            )
+
         # During track loads, playbin can rebuild its audio sink and briefly
         # report the new sink's default volume. Ignore those spurious notifies
         # so the UI doesn't snap to 100%; the real value is restored once the
