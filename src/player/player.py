@@ -132,6 +132,26 @@ class Player(GObject.Object):
         # Timer for progress
         GObject.timeout_add(100, self.update_position)
 
+        # boolean checker if media api (MPRIS or SMTC) is loaded
+        self.media_api_loaded = False
+
+        # Discord Rich Presence (cross-platform; no-op if pypresence missing
+        # or Discord not running).
+        try:
+            self.discord_rpc = DiscordRPCAdapter(self)
+            self.connect("state-changed", self._on_discord_state_changed)
+            self.connect("metadata-changed", self._on_discord_metadata_changed)
+        except Exception as e:
+            print(f"Discord RPC init failed: {e}")
+            self.discord_rpc = None
+
+    def load_media_api(self):
+        "Starts MPRIS or SMTC for Linux or Windows, called once only when player starts playing a track"
+        if self.media_api_loaded:
+            return
+
+        self.media_api_loaded = True
+
         # MPRIS Setup (Linux-only, requires D-Bus)
         if HAS_MPRIS:
             self.mpris_adapter = MuseMprisAdapter(self)
@@ -158,16 +178,6 @@ class Player(GObject.Object):
             except Exception as e:
                 print(f"SMTC init failed: {e}")
                 self.smtc = None
-
-        # Discord Rich Presence (cross-platform; no-op if pypresence missing
-        # or Discord not running).
-        try:
-            self.discord_rpc = DiscordRPCAdapter(self)
-            self.connect("state-changed", self._on_discord_state_changed)
-            self.connect("metadata-changed", self._on_discord_metadata_changed)
-        except Exception as e:
-            print(f"Discord RPC init failed: {e}")
-            self.discord_rpc = None
 
     def _on_discord_state_changed(self, obj, state):
         if getattr(self, "discord_rpc", None):
@@ -521,6 +531,8 @@ class Player(GObject.Object):
 
     def _play_current_index(self):
         if 0 <= self.current_queue_index < len(self.queue):
+            self.load_media_api()
+
             track = self.queue[self.current_queue_index]
             video_id = str(track.get("videoId") or "")
             title = str(track.get("title") or "Unknown")

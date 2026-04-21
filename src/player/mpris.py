@@ -195,6 +195,7 @@ class MuseMprisAdapter(MprisAdapter):
                     "mpris:trackid": "/com/pocoguy/Muse/track/none",
                     "xesam:title": "",
                     "xesam:artist": [],
+                    "xesam:album": "",
                 }
 
             track = self.player.queue[self.player.current_queue_index]
@@ -226,6 +227,11 @@ class MuseMprisAdapter(MprisAdapter):
             safe_id = video_id.replace("-", "_").replace(".", "_")
             if safe_id[0].isdigit():
                 safe_id = "v" + safe_id
+            
+            album = track.get("album", "")
+            if isinstance(album, dict):
+                album = album.get("name", "")
+            album = str(album or "")
 
             m = {
                 "mpris:trackid": f"/com/pocoguy/Muse/track/{safe_id}",
@@ -234,6 +240,7 @@ class MuseMprisAdapter(MprisAdapter):
                 else 0,
                 "xesam:title": track.get("title", "Unknown Title"),
                 "xesam:artist": [artist],
+                "xesam:album": album,
             }
 
             art_url = getattr(self.player, "mpris_art_url", None)
