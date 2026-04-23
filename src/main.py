@@ -33,6 +33,27 @@ if sys.platform == "win32":
                         except Exception as _e:
                             print(f"Could not install font {_f}: {_e}")
 
+# Apply the user-chosen GSK renderer *before* GTK loads. Some NVIDIA driver
+# versions crash inside the default renderer (libnvidia-glcore + gsk_renderer_render);
+# users can override via Preferences → Application.
+def _apply_gsk_renderer_pref():
+    if os.environ.get("GSK_RENDERER"):
+        return  # explicit env var wins
+    try:
+        import json
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+        prefs_path = os.path.join(base, "muse", "prefs.json")
+        if not os.path.exists(prefs_path):
+            return
+        with open(prefs_path) as f:
+            value = json.load(f).get("gsk_renderer", "default")
+        if value and value != "default":
+            os.environ["GSK_RENDERER"] = value
+    except Exception:
+        pass
+
+_apply_gsk_renderer_pref()
+
 import gi
 
 gi.require_version("Gtk", "4.0")

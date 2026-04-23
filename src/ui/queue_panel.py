@@ -258,8 +258,11 @@ class QueuePanel(Gtk.Box):
         self._update_repeat_state()
 
     def _refresh_playlists_menu(self):
-        self.playlist_menu.remove_all()
-        self.more_menu_model.remove_all()
+        # Rebuild from scratch — see expanded_player._refresh_more_menu for
+        # why mutating in place is not safe with GtkPopoverMenu submenus.
+        self.playlist_menu = Gio.Menu()
+        self.more_menu_model = Gio.Menu()
+        self.more_btn.set_menu_model(self.more_menu_model)
         from ui.utils import is_online
 
         if not is_online():

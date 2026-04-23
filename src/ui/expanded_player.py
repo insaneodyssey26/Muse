@@ -571,7 +571,12 @@ class ExpandedPlayer(Gtk.Box):
     # ── More menu (3-dot) handlers ──────────────────────────────────────────
 
     def _refresh_more_menu(self):
-        self.more_menu_model.remove_all()
+        # Rebuild the menu model from scratch and re-hand it to the button.
+        # Mutating the existing model in place causes GtkPopoverMenu's
+        # internal GtkStack to accumulate stale submenu pages, producing
+        # "duplicate child name in GtkStack" warnings.
+        self.more_menu_model = Gio.Menu()
+        self.more_btn.set_menu_model(self.more_menu_model)
 
         vid = self.player.current_video_id
 

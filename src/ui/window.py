@@ -52,15 +52,11 @@ class MainWindow(Adw.ApplicationWindow):
         ctrl.connect("key-pressed", self.on_window_key_pressed)
         self.add_controller(ctrl)
 
-        # Menu (About/Preferences)
-        menu = Gio.Menu()
-        menu.append("Preferences", "win.preferences")
-        menu.append("About Mixtapes", "win.about")
-        menu.append("Quit", "win.quit")
-
-        menu_btn = Gtk.MenuButton()
-        menu_btn.set_icon_name("open-menu-symbolic")
-        menu_btn.set_menu_model(menu)
+        # Avatar menu button — replaces the hamburger. Opens a popover
+        # with the user's profile, their channel link, the library
+        # navigation shortcuts (upload/history/downloads), and the
+        # previous hamburger entries (Preferences / About / Quit).
+        menu_btn = self._build_avatar_menu_button()
 
         # Content setup: ViewStack
         self.view_stack = Adw.ViewStack()
@@ -162,6 +158,24 @@ class MainWindow(Adw.ApplicationWindow):
         self.header_bar.pack_end(self._upload_progress_btn)
         self.header_bar.pack_end(self._download_progress_btn)
 
+        # Refresh Library + Uploads. Visible only when the Library tab is
+        # active; has a small inline spinner that shows during the refresh.
+        self._lib_refresh_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._lib_refresh_box.set_visible(False)
+        self._lib_refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic")
+        self._lib_refresh_btn.add_css_class("flat")
+        self._lib_refresh_btn.set_valign(Gtk.Align.CENTER)
+        self._lib_refresh_btn.set_tooltip_text("Refresh library")
+        self._lib_refresh_btn.connect("clicked", self._on_library_refresh_clicked)
+        self._lib_refresh_spinner = Adw.Spinner()
+        self._lib_refresh_spinner.set_valign(Gtk.Align.CENTER)
+        self._lib_refresh_spinner.set_margin_start(4)
+        self._lib_refresh_spinner.set_margin_end(4)
+        self._lib_refresh_spinner.set_visible(False)
+        self._lib_refresh_box.append(self._lib_refresh_btn)
+        self._lib_refresh_box.append(self._lib_refresh_spinner)
+        self.header_bar.pack_end(self._lib_refresh_box)
+
         # Search Button (Mobile/Contextual) - Toggle
         self.search_btn = Gtk.ToggleButton(icon_name="system-search-symbolic")
         self.header_bar.pack_start(self.search_btn)
@@ -202,7 +216,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         # Wrap content in OverlaySplitView for Sidebar (Nautilus-style)
         self.split_view = Adw.OverlaySplitView()
-        self.split_view.set_sidebar_position(Gtk.PackType.START)  # Left side
+        self.split_view.set_sidebar_position(self._read_sidebar_position())
         self.split_view.set_min_sidebar_width(250)
         self.split_view.set_max_sidebar_width(450)
 
@@ -253,6 +267,7 @@ class MainWindow(Adw.ApplicationWindow):
             "notify::show-sidebar", self._on_sidebar_visibility_changed
         )
         self.split_view.connect("notify::collapsed", self._on_split_view_collapsed)
+        self._apply_window_controls_position()
 
         # 5. Initialize BottomSheet
         self.bottom_sheet = Adw.BottomSheet()
@@ -305,6 +320,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.view_switcher_bar.add_controller(self.mobile_switcher_click)
 
         from ui.expanded_player import ExpandedPlayer
+        from ui.desktop_cover_view import DesktopCoverView
 
         # Initialize your ExpandedPlayer (now as a standalone Box/Widget)
         self.expanded_player = ExpandedPlayer(
@@ -316,6 +332,13 @@ class MainWindow(Adw.ApplicationWindow):
         self.expanded_player.set_vexpand(True)
         # Connect the dismiss signal to close the sheet
         self.expanded_player.connect("dismiss", self._on_player_dismissed)
+
+        # Desktop equivalent: just the cover art as a separate
+        # main_stack page. Animated via SLIDE_UP (both pages translate
+        # together instead of overlapping), which avoids the OVER_UP
+        # bleed-through without needing any opaque-background tricks.
+        self.desktop_cover_view = DesktopCoverView(self.player)
+        self.main_stack.add_named(self.desktop_cover_view, "cover")
 
         # Do NOT set sheet or add to stack yet, managed by breakpoint or expand request
 
@@ -424,50 +447,6 @@ class MainWindow(Adw.ApplicationWindow):
                     return child
         return None
 
-    def _on_mobile_breakpoint_apply(self, breakpoint):
-        self.add_css_class("compact")
-        was_expanded = (
-            not self._is_compact
-            and self.main_stack.get_visible_child_name() == "player"
-        )
-        self._is_compact = True
-        self.player_bar.set_compact(True)
-        self.expanded_player.set_compact_mode(True)
-        page = self._get_active_responsive_child()
-        if page:
-            page.set_compact_mode(True)
-
-        # Switch to Mobile Title
-        if hasattr(self, "title_bin"):
-            self.title_bin.set_child(self.title_widget)
-
-        if was_expanded:
-            self.main_stack.set_visible_child_name("browser")
-            self.bottom_sheet.set_open(True)
-
-    def _on_mobile_breakpoint_unapply(self, breakpoint):
-        self.remove_css_class("compact")
-        was_expanded = self._is_compact and self.bottom_sheet.get_open()
-        self._is_compact = False
-        self.player_bar.set_compact(False)
-        self.expanded_player.set_compact_mode(False)
-        page = self._get_active_responsive_child()
-        if page:
-            page.set_compact_mode(False)
-
-        # Switch to Desktop Switcher
-        if hasattr(self, "title_bin"):
-            self.title_bin.set_child(self.switcher)
-
-        # Close the bottom sheet when returning to desktop size
-        if hasattr(self, "bottom_sheet") and self.bottom_sheet.get_open():
-            self.bottom_sheet.set_open(False)
-
-        if was_expanded:
-            self.main_stack.set_visible_child_name("player")
-            self.back_btn.set_visible(True)
-            self.update_back_button_visibility()
-
     def on_switcher_reclick(self, gesture, n_press, x, y):
         # We want to detect if the user clicked the ALREADY active tab.
         # Adw.ViewSwitcher doesn't tell us which button was clicked easily.
@@ -485,17 +464,48 @@ class MainWindow(Adw.ApplicationWindow):
 
         GLib.timeout_add(100, check_reclick)
 
+    def _dismiss_cover_if_open(self):
+        """Collapse the desktop cover view if it's currently showing.
+        Called from any code path that navigates to a new page so the
+        cover view can't linger behind a push that the user wouldn't
+        otherwise see."""
+        if (
+            not self._is_compact
+            and self.main_stack.get_visible_child_name() == "cover"
+        ):
+            self._on_player_dismissed(None)
+
     def _on_player_dismissed(self, player):
         """Called when the player is dismissed (tapped back on desktop or swiped down on mobile)."""
         if self._is_compact:
             self.bottom_sheet.set_open(False)
         else:
+            was_cover = self.main_stack.get_visible_child_name() == "cover"
+            if was_cover:
+                # SLIDE_DOWN is the inverse of SLIDE_UP — browser comes
+                # back in from the top, cover exits downward.
+                self.main_stack.set_transition_type(
+                    Gtk.StackTransitionType.SLIDE_DOWN
+                )
             self.main_stack.set_visible_child_name("browser")
+            if was_cover and hasattr(self, "_prev_main_transition"):
+                self.main_stack.set_transition_type(self._prev_main_transition)
+            if was_cover and hasattr(self, "_prev_main_duration"):
+                self.main_stack.set_transition_duration(
+                    self._prev_main_duration
+                )
             self.back_btn.set_visible(False)
             self.update_back_button_visibility()
+        if hasattr(self, "player_bar"):
+            self.player_bar.set_expanded(False)
 
     def on_view_changed(self, stack, param):
         visible_name = self.view_stack.get_visible_child_name()
+
+        # Any top-level navigation (Home/Library/Explore) should
+        # collapse the cover view — it's a full-window takeover and
+        # staying on it through a tab switch makes no sense.
+        self._dismiss_cover_if_open()
 
         # Update Back Button for the new active tab
         self.update_back_button_visibility()
@@ -505,20 +515,142 @@ class MainWindow(Adw.ApplicationWindow):
             # Delay slightly to allow UI transition and background state settlement
             GLib.timeout_add(100, self.library_page.load_library)
 
+        # Refresh button visibility — recomputed also on navigation-stack
+        # changes inside each tab (see update_back_button_visibility).
+        self._update_refresh_button_visibility()
+
         # Close Search Bar when switching tabs
         if self.search_bar.get_search_mode():
             if visible_name != "search":
                 self.search_bar.set_search_mode(False)
+
+    def _get_refresh_target(self):
+        """Pick which page (if any) the header-bar refresh button should act
+        on based on what's currently visible. Returns a callable that, when
+        invoked, reloads that page, or None to hide the button.
+
+        Rules:
+          - Library tab root: refresh the whole library (+ uploads).
+          - PlaylistPage showing a user playlist: refresh its tracks.
+          - Anything else (album, artist, uploads-album, home/explore,
+            pages opened via navigation into derived YTM content): hide.
+        """
+        visible_name = self.view_stack.get_visible_child_name()
+        if visible_name == "library" and hasattr(self, "library_page"):
+            nav = self.view_stack.get_child_by_name("library")
+            if isinstance(nav, Adw.NavigationView):
+                page = nav.get_visible_page()
+                # Library root page has no previous → we're on the list view.
+                if page and not nav.get_previous_page(page):
+                    return self.library_page.trigger_refresh
+                # A sub-page is showing — check if it's a refreshable playlist.
+                child = page.get_child() if page else None
+                if isinstance(child, Adw.ToolbarView):
+                    child = child.get_content()
+                return self._playlist_page_refresh(child)
+        # Playlist pages can live under Home/Explore too.
+        nav = self._get_active_nav_view()
+        if nav:
+            page = nav.get_visible_page()
+            child = page.get_child() if page else None
+            if isinstance(child, Adw.ToolbarView):
+                child = child.get_content()
+            return self._playlist_page_refresh(child)
+        return None
+
+    def _playlist_page_refresh(self, child):
+        """Return a no-arg callable that re-fetches this PlaylistPage or
+        HistoryPage, or None if it's an album / artist page (derived
+        content we don't own the refresh semantics for)."""
+        try:
+            from ui.pages.playlist import PlaylistPage
+            from ui.pages.album import AlbumPage
+            from ui.pages.history import HistoryPage
+        except Exception:
+            return None
+
+        # HistoryPage owns its own load/refresh path.
+        if isinstance(child, HistoryPage):
+            def _do_history():
+                child.load()
+
+                def poll():
+                    if not child._loading_wrap.get_visible():
+                        self._on_library_refresh_finished()
+                        return False
+                    return True
+                GLib.timeout_add(250, poll)
+            return _do_history
+
+        if not isinstance(child, PlaylistPage):
+            return None
+        if isinstance(child, AlbumPage):
+            return None
+        pid = getattr(child, "playlist_id", None) or ""
+        # Derived YTM content (albums, uploads) don't get a refresh button.
+        if pid.startswith("MPRE") or pid.startswith("OLAK"):
+            return None
+        if pid.startswith("FEmusic_library_privately_owned"):
+            return None
+        if not pid:
+            return None
+
+        def _do():
+            # refresh_in_place invalidates cache, resets state, and repopulates
+            # the SAME page — no new NavigationPage is pushed.
+            child.refresh_in_place()
+
+            # The PlaylistPage hides its inline `content_spinner` once the
+            # main fetch completes. Poll for that so the header-bar spinner
+            # matches, instead of hard-coding a timer.
+            def poll():
+                spinner = getattr(child, "content_spinner", None)
+                if spinner is None or not spinner.get_visible():
+                    self._on_library_refresh_finished()
+                    return False
+                return True
+            GLib.timeout_add(250, poll)
+
+        return _do
+
+    def _update_refresh_button_visibility(self):
+        if not hasattr(self, "_lib_refresh_box"):
+            return
+        target = self._get_refresh_target()
+        self._lib_refresh_box.set_visible(target is not None)
+        self._refresh_target = target
+
+    def _on_library_refresh_clicked(self, btn):
+        target = getattr(self, "_refresh_target", None) or self._get_refresh_target()
+        if target is None:
+            return
+        self._lib_refresh_btn.set_visible(False)
+        self._lib_refresh_spinner.set_visible(True)
+        try:
+            target()
+        except Exception as e:
+            print(f"[REFRESH] failed: {e}")
+            self._on_library_refresh_finished()
+
+    def _on_library_refresh_finished(self):
+        if hasattr(self, "_lib_refresh_spinner"):
+            self._lib_refresh_spinner.set_visible(False)
+        if hasattr(self, "_lib_refresh_btn"):
+            self._lib_refresh_btn.set_visible(True)
+            self._lib_refresh_btn.set_sensitive(True)
 
     def on_playlist_header_title_changed(self, page, title):
         if hasattr(self, "title_widget"):
             self.title_widget.set_title(title if title else "Mixtapes")
 
     def update_back_button_visibility(self, *args):
-        # On desktop, if player is expanded, show back button
+        # Refresh-button visibility follows the currently-visible page.
+        self._update_refresh_button_visibility()
+        # On desktop, show back button whenever a full-window player
+        # view is active (legacy expanded player or the cover view).
         if (
             not self._is_compact
-            and self.main_stack.get_visible_child_name() == "player"
+            and self.main_stack.get_visible_child_name() in ("player", "cover")
         ):
             self.back_btn.set_visible(True)
             return
@@ -545,7 +677,7 @@ class MainWindow(Adw.ApplicationWindow):
     def on_back_clicked(self, btn):
         if (
             not self._is_compact
-            and self.main_stack.get_visible_child_name() == "player"
+            and self.main_stack.get_visible_child_name() in ("player", "cover")
         ):
             self._on_player_dismissed(None)
             return
@@ -553,6 +685,342 @@ class MainWindow(Adw.ApplicationWindow):
         nav = self._get_active_nav_view()
         if nav:
             nav.pop()
+
+    def _build_avatar_menu_button(self):
+        """Avatar button in the header bar. Replaces the hamburger menu.
+        Shows the user's channel photo; clicking reveals a popover with
+        name, channel link, upload/history/downloads shortcuts, and
+        Preferences/About/Quit."""
+        from ui.utils import AsyncImage
+
+        menu_btn = Gtk.MenuButton()
+        menu_btn.add_css_class("flat")
+        menu_btn.add_css_class("circular")
+        menu_btn.set_tooltip_text("Account")
+
+        # Use Adw.Avatar — it handles the circular mask natively. A
+        # hand-rolled Gtk.Image in a Box with overflow:hidden was
+        # getting squeezed into a non-square allocation inside the
+        # MenuButton's internal layout.
+        self._avatar_small = Adw.Avatar.new(28, "", False)
+        menu_btn.set_child(self._avatar_small)
+
+        # Custom popover — GMenu can't host the name/photo header nicely.
+        popover = Gtk.Popover()
+        popover.add_css_class("menu")
+        menu_btn.set_popover(popover)
+        self._avatar_popover = popover
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.set_margin_start(8)
+        box.set_margin_end(8)
+        box.set_size_request(240, -1)
+        popover.set_child(box)
+
+        # ── Profile header (avatar + name + handle) ──────────────────
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        header.set_margin_bottom(4)
+        header.set_margin_start(4)
+        header.set_margin_end(4)
+        header.set_margin_top(4)
+
+        self._avatar_large = Adw.Avatar.new(48, "", False)
+        header.append(self._avatar_large)
+
+        name_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        name_col.set_valign(Gtk.Align.CENTER)
+        name_col.set_hexpand(True)
+        self._avatar_name_label = Gtk.Label(label="Not signed in")
+        self._avatar_name_label.add_css_class("heading")
+        self._avatar_name_label.set_halign(Gtk.Align.START)
+        self._avatar_name_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self._avatar_handle_label = Gtk.Label(label="")
+        self._avatar_handle_label.add_css_class("caption")
+        self._avatar_handle_label.add_css_class("dim-label")
+        self._avatar_handle_label.set_halign(Gtk.Align.START)
+        self._avatar_handle_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self._avatar_handle_label.set_visible(False)
+        name_col.append(self._avatar_name_label)
+        name_col.append(self._avatar_handle_label)
+        header.append(name_col)
+        box.append(header)
+
+        # ── Helper to build each menu row (icon + label, flat button) ─
+        def _row(icon_name, label, callback, sensitive=True):
+            btn = Gtk.Button()
+            btn.add_css_class("flat")
+            btn.add_css_class("avatar-menu-row")
+            btn.set_sensitive(sensitive)
+            hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            icon = Gtk.Image.new_from_icon_name(icon_name)
+            icon.set_pixel_size(16)
+            hb.append(icon)
+            lbl = Gtk.Label(label=label)
+            lbl.set_halign(Gtk.Align.START)
+            lbl.set_hexpand(True)
+            hb.append(lbl)
+            btn.set_child(hb)
+
+            def _on_click(_b):
+                popover.popdown()
+                callback()
+
+            btn.connect("clicked", _on_click)
+            return btn
+
+        # ── Your channel ─────────────────────────────────────────────
+        self._avatar_channel_btn = _row(
+            "avatar-default-symbolic",
+            "Your channel",
+            self._open_own_channel,
+        )
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        box.append(self._avatar_channel_btn)
+
+        # ── Library shortcuts (moved from library actions row) ───────
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        box.append(_row(
+            "document-send-symbolic",
+            "Upload songs",
+            self._open_upload_picker,
+        ))
+        box.append(_row(
+            "document-open-recent-symbolic",
+            "Listening history",
+            self._open_history_from_menu,
+        ))
+        box.append(_row(
+            "folder-download-symbolic",
+            "Downloaded songs",
+            self._open_downloads_from_menu,
+        ))
+
+        # ── App menu (previous hamburger entries) ────────────────────
+        # Call the handlers directly — the action-based path
+        # (`self.activate_action(...)`) has been flaky when invoked
+        # from inside a popover button click.
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        box.append(_row(
+            "preferences-system-symbolic",
+            "Preferences",
+            lambda: self.show_preferences(None, None),
+        ))
+        box.append(_row(
+            "help-about-symbolic",
+            "About Mixtapes",
+            lambda: self.show_about(None, None),
+        ))
+        box.append(_row(
+            "application-exit-symbolic",
+            "Quit",
+            lambda: self._on_force_quit(None, None),
+        ))
+
+        # Kick off an async fetch to populate the profile so the first
+        # paint shows the user's real photo/name.
+        GLib.idle_add(self._refresh_avatar_profile)
+        return menu_btn
+
+    def _refresh_avatar_profile(self):
+        """Fetch account info in a background thread and paint the
+        avatar + name when it returns."""
+        if not self.player.client.is_authenticated():
+            return False
+
+        def _work():
+            info = self.player.client.get_account_info()
+            GLib.idle_add(self._apply_avatar_profile, info or {})
+
+        threading.Thread(target=_work, daemon=True).start()
+        return False
+
+    def _apply_avatar_profile(self, info):
+        name = info.get("accountName") or "Not signed in"
+        handle = info.get("channelHandle") or ""
+        photo = info.get("accountPhotoUrl") or ""
+        self._avatar_name_label.set_label(name)
+        self._avatar_small.set_text(name)
+        self._avatar_large.set_text(name)
+        if handle:
+            self._avatar_handle_label.set_label(handle)
+            self._avatar_handle_label.set_visible(True)
+        else:
+            self._avatar_handle_label.set_visible(False)
+        if photo:
+            self._load_avatar_photo(photo)
+        self._avatar_channel_btn.set_sensitive(bool(handle))
+
+    def _load_avatar_photo(self, url):
+        """Fetch the account photo and feed it into both Adw.Avatar
+        widgets as a GdkTexture. Adw.Avatar needs a paintable — it
+        doesn't take a URL directly.
+
+        ytmusicapi returns the smallest thumbnail (~48px), which looks
+        blurry on HiDPI displays. `get_high_res_url` swaps the `s48`
+        path segment for `s800`, giving us a sharp source that Adw.Avatar
+        can downscale cleanly."""
+        from ui.utils import read_thumb_cache, write_thumb_cache, get_high_res_url
+
+        hi_url = get_high_res_url(url) or url
+
+        def _work():
+            data = read_thumb_cache(hi_url)
+            if not data:
+                try:
+                    import requests
+                    resp = requests.get(
+                        hi_url,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        timeout=10,
+                    )
+                    resp.raise_for_status()
+                    data = resp.content
+                    write_thumb_cache(hi_url, data)
+                except Exception as e:
+                    print(f"[AVATAR] fetch failed: {e}")
+                    return
+
+            def _apply():
+                try:
+                    from gi.repository import GdkPixbuf
+                    loader = GdkPixbuf.PixbufLoader()
+                    loader.write(data)
+                    loader.close()
+                    pixbuf = loader.get_pixbuf()
+                    if pixbuf is None:
+                        return False
+                    texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+                    self._avatar_small.set_custom_image(texture)
+                    self._avatar_large.set_custom_image(texture)
+                except Exception as e:
+                    print(f"[AVATAR] texture build failed: {e}")
+                return False
+
+            GLib.idle_add(_apply)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _open_own_channel(self):
+        """Resolve the user's @handle to a channel browseId and push an
+        ArtistPage inside the app (same as tapping any other artist
+        link). The resolution runs in a background thread so the
+        popover doesn't hang while YT's endpoint responds."""
+        info = self.player.client.get_account_info() or {}
+        handle = info.get("channelHandle") or ""
+        name = info.get("accountName") or ""
+        if not handle:
+            return
+
+        def _work():
+            browse_id = self.player.client.resolve_channel_handle(handle)
+            if browse_id:
+                GLib.idle_add(self.open_artist, browse_id, name)
+            else:
+                GLib.idle_add(
+                    self.add_toast, "Couldn't open your channel"
+                )
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _open_upload_picker(self):
+        lib = getattr(self, "library_page", None)
+        if lib and hasattr(lib, "uploads_page"):
+            lib.uploads_page._do_open_file_picker(self)
+
+    def _open_history_from_menu(self):
+        """Push HistoryPage onto the currently-visible tab's nav view.
+        The heavy row-building happens after a short delay so the
+        forward-nav slide animation runs on an empty page — rendering
+        a few hundred rows synchronously inside `page.load()` was
+        stalling the transition."""
+        from ui.utils import is_online
+        if not is_online():
+            self.add_toast("History requires an internet connection")
+            return
+        if not self.player.client.is_authenticated():
+            self.add_toast("Sign in to view listening history")
+            return
+
+        nav = self._get_active_nav_view()
+        if not nav:
+            return
+        from ui.pages.history import HistoryPage
+        page = HistoryPage(self.player)
+        if getattr(self, "_is_compact", False):
+            page.set_compact_mode(True)
+        # Paint cached rows BEFORE the push so the pushed page arrives
+        # already populated — otherwise the forward-nav slide shows a
+        # blank surface for the 350ms until the fresh fetch lands.
+        page.load_cached()
+        nav_page = Adw.NavigationPage(child=page, title="Listening History")
+        nav.push(nav_page)
+        # Fresh fetch runs after the transition so it doesn't compete
+        # for frame time with the slide animation.
+        page.refresh_from_server(delay_ms=350)
+
+    def _open_downloads_from_menu(self):
+        """Push the Downloads PlaylistPage onto the visible tab's nav
+        view. Same rationale as _open_history_from_menu — keep the
+        forward-nav animation."""
+        nav = self._get_active_nav_view()
+        if not nav:
+            return
+        from ui.pages.playlist import PlaylistPage
+        page = PlaylistPage(self.player)
+        page.playlist_id = "DOWNLOADS"
+        page.is_fully_loaded = True
+        page.is_fully_fetched = True
+        if getattr(self, "_is_compact", False):
+            page.set_compact_mode(True)
+        nav_page = Adw.NavigationPage(child=page, title="Downloaded Songs")
+        nav.push(nav_page)
+        page.stack.set_visible_child_name("loading")
+
+        def _fetch():
+            from player.downloads import get_download_db
+            db = get_download_db()
+            downloads = db.get_all_downloads()
+            tracks = []
+            for d in downloads:
+                t = {
+                    "videoId": d.get("video_id"),
+                    "title": d.get("title", "Unknown"),
+                    "artists": (
+                        [{"name": d.get("artist", ""), "id": None}]
+                        if d.get("artist") else []
+                    ),
+                    "album": {"name": d.get("album", "")},
+                    "duration_seconds": d.get("duration_seconds", 0),
+                    "thumbnails": (
+                        [{"url": d.get("thumbnail_url")}]
+                        if d.get("thumbnail_url") else []
+                    ),
+                }
+                dur = d.get("duration_seconds", 0)
+                if dur:
+                    t["duration"] = f"{dur // 60}:{dur % 60:02d}"
+                tracks.append(t)
+            GLib.idle_add(self._fill_downloads_page, page, tracks)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _fill_downloads_page(self, page, tracks):
+        page.original_tracks = tracks
+        page.current_tracks = tracks
+        total_seconds = sum(t.get("duration_seconds", 0) for t in tracks)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        dur = f"{hours} hr {minutes} min" if hours > 0 else f"{minutes} min"
+        page.update_ui(
+            title="Downloaded Songs",
+            description="",
+            meta1=f"{len(tracks)} songs available offline",
+            meta2=dur,
+            thumbnails=tracks[0].get("thumbnails", []) if tracks else [],
+            tracks=tracks,
+        )
 
     def _get_active_nav_view(self):
         nav = self.view_stack.get_visible_child()
@@ -592,14 +1060,13 @@ class MainWindow(Adw.ApplicationWindow):
         dm = self.player.download_manager
         dm.queue_tracks(tracks, album_title, album_id)
 
-        # Register playlist for incremental m3u8 generation
+        # Register playlist for incremental m3u8 generation. We deliberately
+        # DON'T fall back to tracks[0]'s thumbnail — that would paint the
+        # first song's cover onto the playlist when a user downloads a
+        # single track. The playlist cover is owned by PlaylistPage and
+        # cached on open; register_playlist no longer writes it.
         if album_title and tracks:
-            pl_thumb = thumb_url or (
-                tracks[0].get("thumbnails", [{}])[-1].get("url")
-                if tracks[0].get("thumbnails")
-                else None
-            )
-            dm.register_playlist(album_id, album_title, tracks, pl_thumb)
+            dm.register_playlist(album_id, album_title, tracks, thumb_url)
 
         # Add items to the popover queue
         for t in tracks:
@@ -626,9 +1093,17 @@ class MainWindow(Adw.ApplicationWindow):
             progress.set_visible(False)
             info.append(progress)
             row.append(info)
+            cancel_btn = Gtk.Button.new_from_icon_name("window-close-symbolic")
+            cancel_btn.set_valign(Gtk.Align.CENTER)
+            cancel_btn.add_css_class("flat")
+            cancel_btn.add_css_class("circular")
+            cancel_btn.set_tooltip_text("Cancel")
+            cancel_btn.connect("clicked", self._on_cancel_download_clicked, vid)
+            row.append(cancel_btn)
             row._video_id = vid
             row._status_label = status
             row._progress_bar = progress
+            row._cancel_btn = cancel_btn
             self._download_queue_box.append(row)
 
         self._download_progress_btn.set_visible(True)
@@ -667,15 +1142,25 @@ class MainWindow(Adw.ApplicationWindow):
                     bar.set_fraction(fraction)
                 if status:
                     status.set_label(f"{int(fraction * 100)}%")
+                # yt_dlp has already started writing bytes — too late to cancel.
+                cancel_btn = getattr(child, "_cancel_btn", None)
+                if cancel_btn:
+                    cancel_btn.set_visible(False)
                 break
             child = child.get_next_sibling()
 
     def _on_download_item_done(self, dm, video_id, success, message):
+        if success:
+            self._download_success_count = (
+                getattr(self, "_download_success_count", 0) + 1
+            )
         child = self._download_queue_box.get_first_child()
         while child:
             if getattr(child, "_video_id", None) == video_id:
                 if success:
                     child._status_label.set_label("Done")
+                elif message == "Cancelled":
+                    child._status_label.set_label("Cancelled")
                 else:
                     child._status_label.set_label("Failed")
                 bar = getattr(child, "_progress_bar", None)
@@ -683,11 +1168,20 @@ class MainWindow(Adw.ApplicationWindow):
                     if success:
                         bar.set_fraction(1.0)
                     bar.set_visible(False)
+                cancel_btn = getattr(child, "_cancel_btn", None)
+                if cancel_btn:
+                    cancel_btn.set_visible(False)
                 break
             child = child.get_next_sibling()
 
+    def _on_cancel_download_clicked(self, btn, video_id):
+        dm = self.player.download_manager
+        dm.cancel_queued(video_id)
+
     def _on_download_complete(self, dm):
-        self.add_toast("Downloads complete")
+        if getattr(self, "_download_success_count", 0) > 0:
+            self.add_toast("Downloads complete")
+        self._download_success_count = 0
         # Clear done items after delay
         GLib.timeout_add(5000, self._clear_download_queue)
 
@@ -783,11 +1277,56 @@ class MainWindow(Adw.ApplicationWindow):
         about.set_application_icon("com.pocoguy.Muse")
         about.set_application_name("Mixtapes")
         about.set_developer_name("POCOGuy")
-        about.set_version("2026-18-04.0")
+        about.set_version("2026-23-04.0")
         about.set_website("https://www.pocoguy.com/#!/mixtapes")
         about.set_copyright("© 2026 POCOGuy")
         about.set_license_type(Gtk.License.GPL_3_0)
         about.present(self)
+
+    def _read_sidebar_position(self):
+        import json as _json
+        path = os.path.join(GLib.get_user_data_dir(), "muse", "prefs.json")
+        side = "left"
+        try:
+            if os.path.exists(path):
+                with open(path) as f:
+                    side = _json.load(f).get("sidebar_position", "left")
+        except Exception:
+            pass
+        return Gtk.PackType.END if side == "right" else Gtk.PackType.START
+
+    def _apply_window_controls_position(self):
+        """Route window controls (close/min/max) to the correct outer edge.
+
+        Each pane in an OverlaySplitView has its own HeaderBar, and the
+        sidebar can be hidden, collapsed to an overlay, or shown beside the
+        content. The sidebar only "owns" the outer trailing edge when it
+        is on the right AND visible AND not collapsed; in every other case
+        the content header owns it.
+        """
+        if not hasattr(self, "queue_panel") or not hasattr(self, "header_bar"):
+            return
+        is_right = self.split_view.get_sidebar_position() == Gtk.PackType.END
+        collapsed = self.split_view.get_collapsed()
+        sidebar_visible = self.split_view.get_show_sidebar()
+        sidebar_owns_trailing = is_right and sidebar_visible and not collapsed
+        sidebar_hdr = self.queue_panel.header_bar
+        content_hdr = self.header_bar
+
+        if sidebar_owns_trailing:
+            content_hdr.set_show_start_title_buttons(True)
+            content_hdr.set_show_end_title_buttons(False)
+            sidebar_hdr.set_show_start_title_buttons(False)
+            sidebar_hdr.set_show_end_title_buttons(True)
+        else:
+            content_hdr.set_show_start_title_buttons(False)
+            content_hdr.set_show_end_title_buttons(True)
+            # Only show start-side buttons on the sidebar when it's visibly
+            # hugging the outer left edge (rare close-on-left layouts).
+            sidebar_hdr.set_show_start_title_buttons(
+                not is_right and sidebar_visible and not collapsed
+            )
+            sidebar_hdr.set_show_end_title_buttons(False)
 
     def show_preferences(self, action, param):
         prefs = Adw.PreferencesDialog()
@@ -846,6 +1385,100 @@ class MainWindow(Adw.ApplicationWindow):
         offline_row.connect("notify::active", on_offline_toggled)
         app_group.add(offline_row)
 
+        sidebar_right_row = Adw.SwitchRow()
+        sidebar_right_row.set_title("Sidebar on the Right")
+        sidebar_right_row.set_subtitle("Place the queue sidebar on the right edge")
+        sidebar_right_row.set_active(
+            _prefs.get("sidebar_position", "left") == "right"
+        )
+
+        def on_sidebar_position_toggled(switch, pspec):
+            on_right = switch.get_active()
+            _prefs["sidebar_position"] = "right" if on_right else "left"
+            os.makedirs(os.path.dirname(_prefs_path), exist_ok=True)
+            with open(_prefs_path, "w") as f:
+                _json.dump(_prefs, f)
+            if hasattr(self, "split_view"):
+                self.split_view.set_sidebar_position(
+                    Gtk.PackType.END if on_right else Gtk.PackType.START
+                )
+                self._apply_window_controls_position()
+
+        sidebar_right_row.connect("notify::active", on_sidebar_position_toggled)
+        app_group.add(sidebar_right_row)
+
+        # GSK renderer override. Some GPU/driver combos (notably certain NVIDIA
+        # versions) crash inside the default renderer; switching to "gl" or
+        # "cairo" is a known workaround. Takes effect on next launch.
+        renderer_row = Adw.ComboRow()
+        renderer_row.set_title("Renderer")
+        renderer_row.set_subtitle(
+            "Switch if you hit GPU-related crashes. Applies on next launch."
+        )
+        renderer_keys = ["default", "ngl", "gl", "vulkan", "cairo"]
+        renderer_labels = [
+            "Default (recommended)",
+            "NGL",
+            "Legacy GL",
+            "Vulkan",
+            "Cairo (Software)",
+        ]
+        renderer_row.set_model(Gtk.StringList.new(renderer_labels))
+        current_renderer = _prefs.get("gsk_renderer", "default")
+        for i, key in enumerate(renderer_keys):
+            if key == current_renderer:
+                renderer_row.set_selected(i)
+                break
+
+        def on_renderer_changed(row, pspec):
+            idx = row.get_selected()
+            if not (0 <= idx < len(renderer_keys)):
+                return
+            _prefs["gsk_renderer"] = renderer_keys[idx]
+            os.makedirs(os.path.dirname(_prefs_path), exist_ok=True)
+            with open(_prefs_path, "w") as f:
+                _json.dump(_prefs, f)
+
+        renderer_row.connect("notify::selected", on_renderer_changed)
+        app_group.add(renderer_row)
+
+        # Listening-history recording timing. YT Music counts a play the
+        # moment you open a track; we default to matching that, but offer
+        # "After 30s" (stricter) and "Never" (opt-out).
+        history_keys = ["immediate", "after_30s", "never"]
+        history_labels = [
+            "Immediately",
+            "After 30 seconds",
+            "Never",
+        ]
+        history_row = Adw.ComboRow()
+        history_row.set_title("Record Plays to History")
+        history_row.set_subtitle(
+            "When Mixtapes should tell YouTube Music a song was played"
+        )
+        history_row.set_model(Gtk.StringList.new(history_labels))
+        current_history_mode = _prefs.get("history_mode", "immediate")
+        for i, key in enumerate(history_keys):
+            if key == current_history_mode:
+                history_row.set_selected(i)
+                break
+
+        def on_history_mode_changed(row, pspec):
+            idx = row.get_selected()
+            if idx < 0 or idx >= len(history_keys):
+                return
+            _prefs["history_mode"] = history_keys[idx]
+            os.makedirs(os.path.dirname(_prefs_path), exist_ok=True)
+            with open(_prefs_path, "w") as f:
+                _json.dump(_prefs, f)
+            # Reflect the change live on the player so the next track
+            # respects the new mode without a restart.
+            if hasattr(self.player, "set_history_mode"):
+                self.player.set_history_mode(history_keys[idx])
+
+        history_row.connect("notify::selected", on_history_mode_changed)
+        app_group.add(history_row)
+
         # Discord RPC group
         from player.discord_rpc import (
             STATUS_DISPLAY_TYPES,
@@ -898,6 +1531,7 @@ class MainWindow(Adw.ApplicationWindow):
             with open(_prefs_path, "w") as f:
                 _json.dump(_prefs, f)
             display_row.set_sensitive(enabled)
+            small_icon_row.set_sensitive(enabled)
             if rpc_adapter:
                 rpc_adapter.set_enabled(enabled)
                 status_label.set_label(rpc_adapter.status)
@@ -917,6 +1551,26 @@ class MainWindow(Adw.ApplicationWindow):
 
         display_row.connect("notify::selected", on_display_changed)
         rpc_group.add(display_row)
+
+        # Small icon toggle
+        small_icon_row = Adw.SwitchRow()
+        small_icon_row.set_title("Show Play/Pause Icon")
+        small_icon_row.set_subtitle(
+            "Display a small play or pause indicator on the album art"
+        )
+        small_icon_row.set_active(_prefs.get("discord_rpc_small_icon_enabled", True))
+        small_icon_row.set_sensitive(rpc_enabled_row.get_active())
+
+        def on_small_icon_toggled(switch, pspec):
+            _prefs["discord_rpc_small_icon_enabled"] = switch.get_active()
+            os.makedirs(os.path.dirname(_prefs_path), exist_ok=True)
+            with open(_prefs_path, "w") as f:
+                _json.dump(_prefs, f)
+            if rpc_adapter and rpc_adapter._enabled:
+                rpc_adapter.update()
+
+        small_icon_row.connect("notify::active", on_small_icon_toggled)
+        rpc_group.add(small_icon_row)
 
         from api.client import MusicClient
 
@@ -958,7 +1612,10 @@ class MainWindow(Adw.ApplicationWindow):
         from player.downloads import (
             get_preferred_format,
             set_preferred_format,
+            get_folder_structure,
+            set_folder_structure,
             FORMATS,
+            FOLDER_STRUCTURES,
             get_music_dir,
         )
 
@@ -989,6 +1646,51 @@ class MainWindow(Adw.ApplicationWindow):
         format_row.connect("notify::selected", on_format_changed)
         dl_group.add(format_row)
 
+        structure_row = Adw.ComboRow()
+        structure_row.set_title("Folder Structure")
+        structure_row.set_subtitle("How new downloads are organized on disk")
+        structure_labels = [
+            "Artist / Album / Song",
+            "Artist / Song",
+            "No folders",
+        ]
+        structure_row.set_model(Gtk.StringList.new(structure_labels))
+
+        current_structure = get_folder_structure()
+        for i, name in enumerate(FOLDER_STRUCTURES):
+            if name == current_structure:
+                structure_row.set_selected(i)
+                break
+
+        def on_structure_changed(row, pspec):
+            idx = row.get_selected()
+            if not (0 <= idx < len(FOLDER_STRUCTURES)):
+                return
+            if not set_folder_structure(FOLDER_STRUCTURES[idx]):
+                return
+            dm = self.player.download_manager
+            if getattr(dm, "_downloading", False):
+                self.add_toast(
+                    "Structure saved. Existing files will be reorganized after downloads finish."
+                )
+                return
+            self.add_toast("Reorganizing downloads...")
+
+            def _run_migration():
+                moved, errors = dm.migrate_folder_structure()
+                if moved == 0 and errors == 0:
+                    msg = "Downloads already organized"
+                elif errors:
+                    msg = f"Reorganized {moved} file(s); {errors} skipped"
+                else:
+                    msg = f"Reorganized {moved} file(s)"
+                GLib.idle_add(self.add_toast, msg)
+
+            threading.Thread(target=_run_migration, daemon=True).start()
+
+        structure_row.connect("notify::selected", on_structure_changed)
+        dl_group.add(structure_row)
+
         prefs.present(self)
 
     def on_logout_clicked(self, btn, prefs_window):
@@ -1000,8 +1702,24 @@ class MainWindow(Adw.ApplicationWindow):
             # Clear library UI immediately
             if hasattr(self, "library_page"):
                 self.library_page.clear()
+            # Reset the avatar button back to "Not signed in" so it
+            # doesn't keep showing the previous user's photo/name.
+            self._reset_avatar_profile()
             # Trigger auth check to show login dialog
             self.check_auth()
+
+    def _reset_avatar_profile(self):
+        """Clear the avatar-menu widgets back to their signed-out state.
+        Called on logout and after a successful login (before the fresh
+        account info lands)."""
+        self._avatar_small.set_custom_image(None)
+        self._avatar_small.set_text("")
+        self._avatar_large.set_custom_image(None)
+        self._avatar_large.set_text("")
+        self._avatar_name_label.set_label("Not signed in")
+        self._avatar_handle_label.set_label("")
+        self._avatar_handle_label.set_visible(False)
+        self._avatar_channel_btn.set_sensitive(False)
 
     def init_pages(self):
         # PlaylistPage imported at top level now
@@ -1194,6 +1912,8 @@ class MainWindow(Adw.ApplicationWindow):
     # on_search_btn_clicked removed (replaced by binding)
 
     def open_playlist(self, playlist_id, initial_data=None):
+        # Collapse the cover view so the pushed page is visible.
+        self._dismiss_cover_if_open()
         # Close search bar when navigating to a detail page
         if self.search_bar.get_search_mode():
             self.search_bar.set_search_mode(False)
@@ -1211,6 +1931,11 @@ class MainWindow(Adw.ApplicationWindow):
         from ui.pages.playlist import PlaylistPage
 
         playlist_page = PlaylistPage(self.player)
+        # Set playlist_id BEFORE push so the header-bar refresh button's
+        # visibility check (fires on notify::visible-page) sees a real id
+        # instead of None. Without this, the button stays hidden until the
+        # next navigation event.
+        playlist_page.playlist_id = playlist_id
 
         # Wrap in NavigationPage
         # PlaylistPage already has a ToolbarView/Header internally.
@@ -1254,6 +1979,8 @@ class MainWindow(Adw.ApplicationWindow):
         pass
 
     def open_artist(self, channel_id, initial_name=None):
+        # Collapse the cover view so the pushed page is visible.
+        self._dismiss_cover_if_open()
         # Uploaded artists can't be opened as regular artists
         if channel_id and channel_id.startswith("FEmusic_library_privately_owned"):
             self._open_upload_artist(channel_id, initial_name or "Artist")
@@ -1556,14 +2283,36 @@ class MainWindow(Adw.ApplicationWindow):
         return False
 
     def on_login_close(self, dialog):
+        # Wipe the signed-out avatar state, then kick off a fresh fetch
+        # so the new account's photo + name land in the menu.
+        self._reset_avatar_profile()
+        self._refresh_avatar_profile()
         # Refresh data
         if hasattr(self, "library_page"):
             self.library_page.load_library()
 
     def _on_mobile_breakpoint_apply(self, *args):
+        # Adw.Breakpoint can fire 'apply' repeatedly while the user drags the
+        # window across the threshold. Every re-entry reparents the expanded
+        # player and re-syncs every page's compact mode, which is expensive
+        # enough to look like a freeze. Short-circuit if we're already compact.
+        if self._is_compact:
+            return
         print(f"[DEBUG-UI] Mobile breakpoint apply. Width: {self.get_width()}")
         self._is_compact = True
         self.add_css_class("compact")
+
+        # The desktop cover view is a desktop-only affordance — mobile
+        # has its own full expanded player. Snap back to browser
+        # silently (no animation) on resize into compact so the mobile
+        # layout can take over immediately.
+        if self.main_stack.get_visible_child_name() == "cover":
+            prev = self.main_stack.get_transition_type()
+            self.main_stack.set_transition_type(Gtk.StackTransitionType.NONE)
+            self.main_stack.set_visible_child_name("browser")
+            self.main_stack.set_transition_type(prev)
+            if hasattr(self, "player_bar"):
+                self.player_bar.set_expanded(False)
 
         # Hide tabs, show title
         if hasattr(self, "title_bin") and hasattr(self, "title_widget"):
@@ -1571,11 +2320,10 @@ class MainWindow(Adw.ApplicationWindow):
 
         if hasattr(self, "player_bar"):
             self.player_bar.set_compact(True)
-        # Apply to current page
-        self._sync_page_compact()
-        # On mobile, we usually want sidebar closed by default
+
+        # On mobile, the sidebar starts closed; don't touch
+        # _sidebar_explicitly_opened so desktop remembers the last state.
         if hasattr(self, "split_view"):
-            # Set sidebar to False but DO NOT update self._sidebar_explicitly_opened
             self.split_view.set_show_sidebar(False)
 
         # Dynamic Reparenting for ExpandedPlayer
@@ -1585,7 +2333,14 @@ class MainWindow(Adw.ApplicationWindow):
                 self.main_stack.remove(self.expanded_player)
             self.bottom_sheet.set_sheet(self.expanded_player)
 
+        # Defer the per-page compact sync — each page does its own layout
+        # work and piling them into the breakpoint-apply frame is the
+        # single biggest source of the resize jank.
+        GLib.idle_add(self._sync_page_compact)
+
     def _on_mobile_breakpoint_unapply(self, *args):
+        if not self._is_compact:
+            return
         print(f"[DEBUG-UI] Mobile breakpoint unapply. Width: {self.get_width()}")
         self._is_compact = False
         self.remove_css_class("compact")
@@ -1601,8 +2356,6 @@ class MainWindow(Adw.ApplicationWindow):
         if hasattr(self, "bottom_sheet"):
             self.bottom_sheet.set_open(False)
 
-        # Apply to current page
-        self._sync_page_compact()
         # Restore desktop state
         if hasattr(self, "split_view"):
             GLib.idle_add(self._restore_sidebar_state)
@@ -1614,12 +2367,22 @@ class MainWindow(Adw.ApplicationWindow):
             if parent != self.main_stack:
                 self.main_stack.add_named(self.expanded_player, "player")
 
+        # Same deferral trick as the apply handler.
+        GLib.idle_add(self._sync_page_compact)
+
     def _restore_sidebar_state(self):
         if hasattr(self, "split_view"):
             has_queue = len(self.player.queue) > 0
-            show = self._sidebar_explicitly_opened and has_queue
+            # Sidebar is desktop-only. Don't let a pending restore open it
+            # on mobile — the queue belongs in the expanded-player's Queue
+            # tab there.
+            show = (
+                self._sidebar_explicitly_opened
+                and has_queue
+                and not self._is_compact
+            )
             print(
-                f"[DEBUG-UI] _restore_sidebar_state: show={show}, explicitly_opened={self._sidebar_explicitly_opened}, has_queue={has_queue}, collapsed={self.split_view.get_collapsed()}"
+                f"[DEBUG-UI] _restore_sidebar_state: show={show}, explicitly_opened={self._sidebar_explicitly_opened}, has_queue={has_queue}, compact={self._is_compact}"
             )
             self.split_view.set_show_sidebar(show)
         return False  # Run once
@@ -1650,29 +2413,48 @@ class MainWindow(Adw.ApplicationWindow):
         print(f"[DEBUG-UI] Sidebar visibility changed: {is_visible}")
         if hasattr(self, "player_bar"):
             self.player_bar.set_queue_active(is_visible)
+        # Window controls may need to move — if the sidebar is on the right
+        # and just became hidden, the content pane now owns the trailing edge.
+        self._apply_window_controls_position()
 
     def _on_player_bar_visibility(self, player, *args):
         has_queue = len(self.player.queue) > 0
         self.player_bar_revealer.set_reveal_child(has_queue)
 
-        # Also close sidebar if queue becomes empty
-        if not has_queue and hasattr(self, "split_view"):
-            if self.split_view.get_show_sidebar():
+        if not has_queue:
+            # Close sidebar if queue becomes empty
+            if hasattr(self, "split_view") and self.split_view.get_show_sidebar():
                 print("[DEBUG-UI] Closing sidebar because queue is empty")
                 self.split_view.set_show_sidebar(False)
-                # Should we reset _sidebar_explicitly_opened?
-                # Probably yes, as the "context" is gone.
+                # The "context" is gone, forget the explicit-open state too.
                 self._sidebar_explicitly_opened = False
+            # Close the expanded-player sheet on mobile — otherwise it stays
+            # open over an empty queue with no player bar behind it.
+            if (
+                self._is_compact
+                and hasattr(self, "bottom_sheet")
+                and self.bottom_sheet.get_open()
+            ):
+                self.bottom_sheet.set_open(False)
+            # Collapse the desktop cover revealer for the same reason:
+            # no track is playing, so there's nothing for it to show.
+            self._dismiss_cover_if_open()
 
     def _on_split_view_collapsed(self, split_view, param):
         collapsed = split_view.get_collapsed()
         print(f"[DEBUG-UI] _on_split_view_collapsed: {collapsed}")
+        self._apply_window_controls_position()
         if not collapsed:
             # When uncollapsing (going back to desktop), force the state
             GLib.idle_add(self._restore_sidebar_state)
 
     def toggle_queue(self):
         """Toggles the visibility of the Queue Sidebar."""
+        # Sidebar is desktop-only. The queue is reached via the expanded
+        # player's Queue tab on mobile, so bail out of any accidental toggle.
+        if self._is_compact:
+            print("[DEBUG-UI] toggle_queue: ignored on mobile")
+            return False
         if hasattr(self, "split_view"):
             current = self.split_view.get_show_sidebar()
             new_state = not current
@@ -1700,7 +2482,34 @@ class MainWindow(Adw.ApplicationWindow):
         return False
 
     def on_expand_requested(self, player_bar):
-        # Sync Initial State (Metadata/Art)
+        # Desktop: page-switch to the cover view with SLIDE_UP. Both the
+        # browser and the cover translate together (no overlap), so
+        # neither page's background can bleed through mid-animation.
+        # Restored in _on_player_dismissed.
+        if not self._is_compact:
+            if self.main_stack.get_visible_child_name() == "cover":
+                self._on_player_dismissed(None)
+                return
+            self._prev_main_transition = self.main_stack.get_transition_type()
+            self._prev_main_duration = self.main_stack.get_transition_duration()
+            self.main_stack.set_transition_duration(200)
+            self.main_stack.set_transition_type(
+                Gtk.StackTransitionType.SLIDE_UP
+            )
+            self.main_stack.set_visible_child_name("cover")
+            # Prime the cover image so the view starts with the right
+            # artwork even if no metadata-changed signal has fired yet.
+            v_id = self.player.current_video_id
+            if v_id:
+                thumb = self.player_bar.cover_img.url
+                self.desktop_cover_view._on_metadata_changed(
+                    self.player, "", "", thumb, v_id, "INDIFFERENT"
+                )
+            self.back_btn.set_visible(True)
+            self.player_bar.set_expanded(True)
+            return
+
+        # Compact / mobile: full ExpandedPlayer in the bottom sheet.
         v_id = self.player.current_video_id
         if v_id:
             t = (
@@ -1716,17 +2525,6 @@ class MainWindow(Adw.ApplicationWindow):
             self.expanded_player.on_metadata_changed(
                 self.player, t, a, self.player_bar.cover_img.url, v_id, "INDIFFERENT"
             )
-
-        if self._is_compact:
-            # Ensure it's correctly parented
-            if self.expanded_player.get_parent() != self.bottom_sheet:
-                # set_sheet handles this
-                self.bottom_sheet.set_sheet(self.expanded_player)
-            self.bottom_sheet.set_open(True)
-        else:
-            # Desktop stack navigation
-            if self.expanded_player.get_parent() != self.main_stack:
-                self.bottom_sheet.set_sheet(None)
-                self.main_stack.add_named(self.expanded_player, "player")
-            self.main_stack.set_visible_child_name("player")
-            self.back_btn.set_visible(True)
+        if self.expanded_player.get_parent() != self.bottom_sheet:
+            self.bottom_sheet.set_sheet(self.expanded_player)
+        self.bottom_sheet.set_open(True)

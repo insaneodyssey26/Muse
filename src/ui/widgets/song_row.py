@@ -18,6 +18,13 @@ class SongRowWidget(Gtk.Box):
         self._start_x = 0
         self._start_y = 0
 
+        # Keep the downloaded indicator in sync across any view showing this
+        # song — react to both completions and removals from elsewhere in the UI.
+        dm = self.player.download_manager
+        self._dm_done_handler = dm.connect("item-done", self._on_dm_item_done)
+        self._dm_removed_handler = dm.connect("download-removed", self._on_dm_download_removed)
+        self.connect("destroy", self._on_destroy)
+
         self.row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         self.row.set_hexpand(True)
         self.row.add_css_class("song-row")
@@ -137,6 +144,28 @@ class SongRowWidget(Gtk.Box):
         left_click.connect("released", self._on_left_released)
         self.row.add_controller(left_click)
 
+    def _current_video_id(self):
+        return self.model_item.video_id if self.model_item else None
+
+    def _on_dm_item_done(self, dm, video_id, success, message):
+        if success and video_id and video_id == self._current_video_id():
+            self.dl_icon.set_visible(True)
+
+    def _on_dm_download_removed(self, dm, video_id):
+        if video_id and video_id == self._current_video_id():
+            self.dl_icon.set_visible(False)
+
+    def _on_destroy(self, widget):
+        dm = self.player.download_manager
+        for hid_attr in ("_dm_done_handler", "_dm_removed_handler"):
+            hid = getattr(self, hid_attr, None)
+            if hid is not None:
+                try:
+                    dm.disconnect(hid)
+                except Exception:
+                    pass
+                setattr(self, hid_attr, None)
+
     def bind(self, item, page):
         # Disconnect previous player signal handler
         if self._player_handler_id is not None:
@@ -225,6 +254,18 @@ class SongRowWidget(Gtk.Box):
                 pass
             self._notify_handler_id = None
         self._stop_animation()
+        # Release the thumbnail texture so GTK can free it — the widget
+        # may be recycled for a different track with a different cover,
+        # and leaving the old paintable attached keeps the texture ref
+        # alive until the bind for the new track completes. Doing this
+        # explicitly bounds peak memory when scrolling through long lists.
+        try:
+            if hasattr(self, "img") and self.img is not None:
+                self.img.set_paintable(None)
+                self.img.url = None
+                self.img._is_placeholder = True
+        except Exception:
+            pass
 
     def _apply_playing_state(self, is_playing):
         if is_playing:
@@ -311,6 +352,19 @@ class SongRowWidget(Gtk.Box):
                     if hasattr(root, "open_artist"):
                         root.open_artist(aid, name)
 
+        def goto_album_action(action, param):
+            album = item.track_data.get("album")
+            if not isinstance(album, dict):
+                return
+            album_id = album.get("id")
+            if not album_id:
+                return
+            root = self.get_root()
+            if hasattr(root, "open_playlist"):
+                root.open_playlist(
+                    album_id, {"title": album.get("name", "Album")}
+                )
+
         action_copy = Gio.SimpleAction.new("copy_link", None)
         action_copy.connect("activate", copy_link_action)
         group.add_action(action_copy)
@@ -318,6 +372,10 @@ class SongRowWidget(Gtk.Box):
         action_goto = Gio.SimpleAction.new("goto_artist", None)
         action_goto.connect("activate", goto_artist_action)
         group.add_action(action_goto)
+
+        action_goto_album = Gio.SimpleAction.new("goto_album", None)
+        action_goto_album.connect("activate", goto_album_action)
+        group.add_action(action_goto_album)
 
         # Add to Playlist
         def add_to_playlist_action(action, param):
@@ -382,6 +440,9 @@ class SongRowWidget(Gtk.Box):
         artists = item.track_data.get("artists", [])
         if artists and artists[0].get("id"):
             nav_section.append("Go to Artist", "row.goto_artist")
+        album_data = item.track_data.get("album")
+        if isinstance(album_data, dict) and album_data.get("id"):
+            nav_section.append("Go to Album", "row.goto_album")
         if nav_section.get_n_items() > 0:
             menu_model.append_section(None, nav_section)
 
@@ -400,11 +461,22 @@ class SongRowWidget(Gtk.Box):
                     if p_id:
                         playlist_menu.append(p_title, f"row.add_to_playlist('{p_id}')")
                 action_section.append_submenu("Add to Playlist", playlist_menu)
-        # Download
-        if item.video_id and _online:
+        # Download / Remove Download
+        if item.video_id:
             root = self.get_root()
             is_dl = root and hasattr(root, 'player') and root.player.download_manager.is_downloaded(item.video_id)
-            if not is_dl:
+            if is_dl:
+                action_section.append("Remove Download", "row.remove_download")
+                def remove_download_action(action, param):
+                    r = self.get_root()
+                    if not (r and hasattr(r, "player")):
+                        return
+                    r.player.download_manager.delete_download(item.video_id)
+                    self.dl_icon.set_visible(False)
+                a_rd = Gio.SimpleAction.new("remove_download", None)
+                a_rd.connect("activate", remove_download_action)
+                group.add_action(a_rd)
+            elif _online:
                 action_section.append("Download", "row.download")
                 def download_action(action, param):
                     r = self.get_root()

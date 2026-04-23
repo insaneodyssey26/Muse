@@ -41,6 +41,10 @@ def get_status_display_type():
     return _get_prefs().get("discord_rpc_status_display", STATUS_DISPLAY_DEFAULT)
 
 
+def get_small_icon_enabled():
+    return _get_prefs().get("discord_rpc_small_icon_enabled", True)
+
+
 OP_HANDSHAKE = 0
 OP_FRAME = 1
 OP_CLOSE = 2
@@ -365,10 +369,13 @@ class DiscordRPCAdapter:
             "status_display_type": display_type,
         }
 
-        small_image = (
+        mixtapes_logo = (
             "https://raw.githubusercontent.com/m-obeid/Mixtapes/"
             "main/screenshots/omori-mixtape.png"
         )
+        show_small_icon = get_small_icon_enabled()
+        small_image = "pause" if state == "playing" else "play"
+        small_text = "Playing" if state == "playing" else "Paused"
 
         album = track.get("album", "")
         if isinstance(album, dict):
@@ -380,14 +387,15 @@ class DiscordRPCAdapter:
             activity["assets"] = {
                 "large_image": thumb,
                 "large_text": (album or title or "Mixtapes")[:128] or "Mixtapes",
-                "small_image": small_image,
-                "small_text": "Mixtapes",
             }
         else:
             activity["assets"] = {
-                "large_image": small_image,
+                "large_image": mixtapes_logo,
                 "large_text": "Mixtapes",
             }
+        if show_small_icon:
+            activity["assets"]["small_image"] = small_image
+            activity["assets"]["small_text"] = small_text
 
         if state == "playing":
             duration = player.duration if player.duration and player.duration > 0 else 0

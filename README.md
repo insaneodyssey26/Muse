@@ -259,6 +259,7 @@ Without a `browser.json` file, the app falls back to the unauthenticated API, wh
 | ✅️ | **Playlist Page** | ✅️ Info<br>✅️ Tracks<br>✅️ Play<br>✅️ Shuffle<br>✅️ Order<br>✅️ Multi-Selection Editing<br>✅️ Cover Change<br>✅️ Change Visibility<br>✅️ Change Description<br>✅️ Change Name |
 | ✅️ | **Album Page** | ✅️ Basic info<br>✅️ Tracks<br>✅️ Play<br>✅️ Shuffle |
 | ✅️ | **Player** | ✅️ Play/Pause<br>✅️ Seeking<br>✅️ Volume<br>✅️ Queue (Previous/Next, Reorder, Shuffle, Repeat modes) |
+| ✅️ | **History** | ✅️ View history<br> ✅️ Share history with Google account<br> ✅️ Delete songs from history |
 | ✅️ | **Caching** | Cache data to reduce latency |
 | ☑️ | **Responsive Design** | Mobile-friendly layout with adaptive UI |
 | ✅️ | **MPRIS Support** | Control playback from system media controls |

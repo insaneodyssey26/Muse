@@ -1,7 +1,123 @@
 import os
+import json as _json
 from gi.repository import Gtk, Adw, GObject, GLib, Gdk, Gio, Pango
 import threading
 from api.client import MusicClient
+
+
+LIBRARY_VIEW_MODES = ("list", "grid")
+DEFAULT_LIBRARY_VIEW_MODE = "grid"
+
+
+def _prefs_path():
+    return os.path.join(GLib.get_user_data_dir(), "muse", "prefs.json")
+
+
+def _load_prefs():
+    path = _prefs_path()
+    try:
+        if os.path.exists(path):
+            with open(path) as f:
+                return _json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_prefs(prefs):
+    path = _prefs_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        with open(path, "w") as f:
+            _json.dump(prefs, f)
+    except Exception:
+        pass
+
+
+def _get_library_view_mode_pref():
+    val = _load_prefs().get("library_view_mode", DEFAULT_LIBRARY_VIEW_MODE)
+    return val if val in LIBRARY_VIEW_MODES else DEFAULT_LIBRARY_VIEW_MODE
+
+
+def _set_library_view_mode_pref(mode):
+    if mode not in LIBRARY_VIEW_MODES:
+        return
+    prefs = _load_prefs()
+    prefs["library_view_mode"] = mode
+    _save_prefs(prefs)
+
+
+def _make_flow_grid():
+    """Shared FlowBox config matching DiscographyPage's card grid.
+    Spacing is 0 so the gutter comes purely from each card's own margins
+    + the `.card` wrapper padding."""
+    grid = Gtk.FlowBox()
+    grid.set_valign(Gtk.Align.START)
+    grid.set_selection_mode(Gtk.SelectionMode.NONE)
+    grid.set_homogeneous(True)
+    grid.set_max_children_per_line(5)
+    grid.set_min_children_per_line(2)
+    grid.set_row_spacing(0)
+    grid.set_column_spacing(0)
+    grid.set_activate_on_single_click(True)
+    grid.set_visible(False)
+    return grid
+
+
+def _make_library_card(player, title, subtitle, thumb_url, fallback_icon):
+    """Vertical cover-on-top card matching DiscographyPage. Returns the
+    FlowBoxChild plus the inner AsyncImage so the caller can attach
+    identifiers or reload the cover later."""
+    from ui.utils import AsyncImage
+
+    child = Gtk.FlowBoxChild()
+    child.add_css_class("library-card")
+
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    box.set_halign(Gtk.Align.CENTER)
+    # Vertical breathing room so rows don't run into each other. Horizontal
+    # gutter is contributed by the FlowBox cell width; this balances that
+    # out with a matching gap between rows.
+    box.set_margin_top(8)
+    box.set_margin_bottom(8)
+
+    img = AsyncImage(url=thumb_url, size=160, player=player)
+    if not thumb_url and fallback_icon:
+        img.set_from_icon_name(fallback_icon)
+
+    wrapper = Gtk.Box()
+    wrapper.set_overflow(Gtk.Overflow.HIDDEN)
+    wrapper.add_css_class("card")
+    wrapper.set_halign(Gtk.Align.CENTER)
+    wrapper.append(img)
+    box.append(wrapper)
+
+    title_label = Gtk.Label(label=title)
+    title_label.set_halign(Gtk.Align.START)
+    title_label.set_ellipsize(Pango.EllipsizeMode.END)
+    title_label.set_wrap(True)
+    title_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+    title_label.set_lines(2)
+    title_label.set_justify(Gtk.Justification.LEFT)
+    title_label.set_tooltip_text(title)
+    title_clamp = Adw.Clamp(maximum_size=160)
+    title_clamp.set_child(title_label)
+    box.append(title_clamp)
+
+    if subtitle:
+        subtitle_label = Gtk.Label(label=subtitle)
+        subtitle_label.set_halign(Gtk.Align.START)
+        subtitle_label.set_ellipsize(Pango.EllipsizeMode.END)
+        subtitle_label.add_css_class("dim-label")
+        subtitle_label.add_css_class("caption")
+        subtitle_clamp = Adw.Clamp(maximum_size=160)
+        subtitle_clamp.set_child(subtitle_label)
+        box.append(subtitle_clamp)
+
+    child.set_child(box)
+    child._cover_img = img
+    child._search_title = title
+    return child
 
 
 class LibraryPage(Adw.Bin):
@@ -24,6 +140,10 @@ class LibraryPage(Adw.Bin):
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
         clamp = Adw.Clamp()
+        # Match PlaylistPage's width so the Library/Explore/Playlist views
+        # line up visually as the user tab-switches.
+        clamp.set_maximum_size(1024)
+        clamp.set_tightening_threshold(600)
 
         self.content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
         self.content_box.set_margin_top(12)
@@ -58,17 +178,23 @@ class LibraryPage(Adw.Bin):
         # Library action buttons (only visible on library tab)
         self.lib_actions_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
 
-        self.downloads_btn = Gtk.Button(icon_name="folder-download-symbolic")
-        self.downloads_btn.add_css_class("flat")
-        self.downloads_btn.add_css_class("circular")
-        self.downloads_btn.set_valign(Gtk.Align.CENTER)
-        self.downloads_btn.set_tooltip_text("Downloaded Songs")
-        self.downloads_btn.connect("clicked", lambda b: self._open_downloads_page())
-        self.lib_actions_box.append(self.downloads_btn)
+        # Single toggle between list and grid view. Icon swaps to show the
+        # mode we'd switch *to* on the next click (like Nautilus).
+        self.view_toggle_btn = Gtk.Button()
+        self.view_toggle_btn.add_css_class("flat")
+        self.view_toggle_btn.add_css_class("circular")
+        self.view_toggle_btn.set_valign(Gtk.Align.CENTER)
+        self.view_toggle_btn.connect("clicked", self._on_view_toggle_clicked)
+        self.lib_actions_box.append(self.view_toggle_btn)
+        self._sync_view_toggle_button()
 
+        # Downloads / History / Upload have moved to the avatar menu in
+        # the header bar — see MainWindow._build_avatar_menu_button.
         tab_row.append(self.lib_actions_box)
 
-        # Upload action buttons (only visible on uploads tab)
+        # Upload action buttons (only visible on uploads tab). The
+        # "Upload songs" action itself lives in the avatar menu; what
+        # stays here is the upload-tab-only "All songs" view shortcut.
         self.uploads_actions_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         self.uploads_actions_box.set_visible(False)
 
@@ -80,14 +206,6 @@ class LibraryPage(Adw.Bin):
         self.all_songs_btn.connect("clicked", lambda b: self.uploads_page._open_all_songs())
         self.uploads_actions_box.append(self.all_songs_btn)
 
-        self.upload_btn = Gtk.Button(icon_name="document-send-symbolic")
-        self.upload_btn.add_css_class("flat")
-        self.upload_btn.add_css_class("circular")
-        self.upload_btn.set_valign(Gtk.Align.CENTER)
-        self.upload_btn.set_tooltip_text("Upload Songs")
-        self.upload_btn.connect("clicked", self._on_upload_clicked)
-        self.uploads_actions_box.append(self.upload_btn)
-
         tab_row.append(self.uploads_actions_box)
         self.content_box.append(tab_row)
 
@@ -98,26 +216,32 @@ class LibraryPage(Adw.Bin):
         # Library tab content (playlists, albums, artists)
         self.lib_content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
 
-        # Loading overlay
-        self.stack = Gtk.Stack()
-        self.stack.set_vexpand(True)
-        self.stack.add_named(self.lib_content_box, "root")
+        # Filter text is driven by the MainWindow global search bar via
+        # `filter_content(text)`, matching PlaylistPage's pattern.
+        self.current_filter_text = ""
 
-        loading_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        loading_box.set_valign(Gtk.Align.CENTER)
-        loading_box.set_halign(Gtk.Align.CENTER)
-        spinner = Adw.Spinner()
-        spinner.set_size_request(32, 32)
-        loading_box.append(spinner)
-        loading_label = Gtk.Label(label="Refreshing Library...")
-        loading_label.add_css_class("caption")
-        loading_box.append(loading_label)
-        self.stack.add_named(loading_box, "loading")
+        self.lib_stack.add_titled(self.lib_content_box, "library", "Library")
 
-        self.lib_stack.add_titled(self.stack, "library", "Library")
+        # Loading spinner is placed as a Gtk.Overlay child at main_box
+        # level (wired up below after the scrolled window is built).
+        # Anchoring here — inside the sizing-constrained scrolled/clamp
+        # hierarchy — never produced a usable center because Adw.Clamp's
+        # allocation collapses to the natural height of its child when
+        # the library is empty.
+        self._loading_wrap = self._build_overlay_loader("Refreshing Library...")
+
+        # Second overlay for the Uploads tab. UploadsPage's own nested
+        # structure (scrolled → clamp → content_box → lib_stack → …)
+        # swallows vexpand and doesn't centre reliably, so we hoist its
+        # loading indicator up to the same main-box-level Overlay that
+        # already works for the library tab.
+        self._uploads_loading_wrap = self._build_overlay_loader(
+            "Loading uploads..."
+        )
 
         # 1. Playlists Section (inside lib_content_box, not content_box)
-        playlists_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.playlists_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        playlists_section = self.playlists_section
 
         playlists_header_box = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL, spacing=12
@@ -149,10 +273,15 @@ class LibraryPage(Adw.Bin):
         self.playlists_list.connect("row-activated", self.on_playlist_activated)
         playlists_section.append(self.playlists_list)
 
+        self.playlists_grid = _make_flow_grid()
+        self.playlists_grid.connect("child-activated", self._on_playlist_grid_activated)
+        playlists_section.append(self.playlists_grid)
+
         self.lib_content_box.append(playlists_section)
 
         # 2. Albums Section
-        albums_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.albums_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        albums_section = self.albums_section
 
         albums_header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         albums_header_box.set_size_request(-1, 34)
@@ -171,10 +300,15 @@ class LibraryPage(Adw.Bin):
         self.albums_list.connect("row-activated", self.on_album_activated)
         albums_section.append(self.albums_list)
 
+        self.albums_grid = _make_flow_grid()
+        self.albums_grid.connect("child-activated", self._on_album_grid_activated)
+        albums_section.append(self.albums_grid)
+
         self.lib_content_box.append(albums_section)
 
         # 3. Artists Section
-        artists_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.artists_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        artists_section = self.artists_section
 
         artists_header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         artists_header_box.set_size_request(-1, 34)
@@ -193,18 +327,46 @@ class LibraryPage(Adw.Bin):
         self.artists_list.connect("row-activated", self.on_artist_activated)
         artists_section.append(self.artists_list)
 
+        self.artists_grid = _make_flow_grid()
+        self.artists_grid.connect("child-activated", self._on_artist_grid_activated)
+        artists_section.append(self.artists_grid)
+
         self.lib_content_box.append(artists_section)
 
         # ── Tab 2: Uploads ──
         self.uploads_page = UploadsPage(self.player, self.client, self.open_playlist_callback)
         self.uploads_page._library_page = self  # Reference for upload queue UI
+        # Hoist the uploads loading indicator to the main-box-level
+        # Overlay so `valign=CENTER` actually centers — the Uploads
+        # tab's internal sizing chain can't do it on its own. Gated on
+        # the uploads tab being visible so it doesn't flash over the
+        # library tab during the parallel initial load.
+        def _set_uploads_loading(visible):
+            on_uploads = self.lib_stack.get_visible_child_name() == "uploads"
+            self._uploads_loading_wrap.set_visible(bool(visible) and on_uploads)
+            self._uploads_loading_pending = bool(visible)
+        self._uploads_loading_pending = False
+        self.uploads_page.set_loading_cb(_set_uploads_loading)
         self.lib_stack.add_titled(self.uploads_page, "uploads", "Uploads")
         self._uploads_loaded = True  # Will be loaded on startup
         self.lib_stack.connect("notify::visible-child-name", self._on_tab_changed)
 
         clamp.set_child(self.content_box)
         scrolled.set_child(clamp)
-        self.main_box.append(scrolled)
+
+        # Gtk.Overlay at the Bin level: the scrolled window is the base
+        # (drives layout, takes the full Bin allocation via vexpand),
+        # and the loading wraps float on top with their own alignment.
+        # This is how DiscographyPage's spinner centers — the difference
+        # for Library is the extra scrolled/clamp nesting, which an
+        # overlay sidesteps entirely.
+        loading_overlay = Gtk.Overlay()
+        loading_overlay.set_vexpand(True)
+        loading_overlay.set_child(scrolled)
+        loading_overlay.add_overlay(self._loading_wrap)
+        loading_overlay.add_overlay(self._uploads_loading_wrap)
+
+        self.main_box.append(loading_overlay)
         self.set_child(self.main_box)
 
         # Load Library + Uploads
@@ -214,6 +376,45 @@ class LibraryPage(Adw.Bin):
         # Connect Player
         self.loading_row_spinner = None
         self.player.connect("state-changed", self.on_player_state_changed)
+
+        # Apply the correct list/grid layout once the widget is about to be
+        # shown — by then self.get_root()._is_compact is trustworthy.
+        # Without this, the first paint always shows the ListBox because
+        # the breakpoint handlers haven't run yet.
+        self.connect("map", self._on_mapped_for_layout)
+
+    def _on_mapped_for_layout(self, *args):
+        root = self.get_root()
+        compact = bool(getattr(root, "_is_compact", False)) if root else False
+        self._apply_library_layout(compact)
+
+    def _sync_view_toggle_button(self):
+        """Set the toggle button's icon + tooltip to show the mode we'd
+        switch to on the next click (Nautilus convention)."""
+        current = _get_library_view_mode_pref()
+        if current == "grid":
+            self.view_toggle_btn.set_icon_name("view-list-symbolic")
+            self.view_toggle_btn.set_tooltip_text("Switch to list view")
+        else:
+            self.view_toggle_btn.set_icon_name("view-grid-symbolic")
+            self.view_toggle_btn.set_tooltip_text("Switch to grid view")
+
+    def _on_view_toggle_clicked(self, btn):
+        new_mode = "list" if _get_library_view_mode_pref() == "grid" else "grid"
+        _set_library_view_mode_pref(new_mode)
+        self._sync_view_toggle_button()
+        root = self.get_root()
+        compact = bool(getattr(root, "_is_compact", False)) if root else False
+        self._apply_library_layout(compact)
+
+    def trigger_refresh(self):
+        """Public entry point used by MainWindow's header-bar refresh button.
+        Reloads both the Library data and the Uploads data."""
+        if self._is_loading:
+            return
+        self.load_library(silent=True)
+        if hasattr(self, "uploads_page") and hasattr(self.uploads_page, "load"):
+            self.uploads_page.load()
 
     def set_compact_mode(self, compact):
         self._compact = compact
@@ -229,6 +430,405 @@ class LibraryPage(Adw.Bin):
         if hasattr(self, 'uploads_page'):
             self.uploads_page.set_compact_mode(compact)
 
+        # Swap between desktop grid and mobile list for each library section.
+        self._apply_library_layout(compact)
+
+    def filter_content(self, text):
+        """Called by MainWindow global search bar — filters library rows/cards."""
+        self.current_filter_text = (text or "").strip().lower()
+        # If user is typing a search on the library tab, route into uploads
+        # too so it filters the currently-visible sub-tab.
+        if hasattr(self, "uploads_page") and hasattr(self.uploads_page, "filter_content"):
+            self.uploads_page.filter_content(text)
+        self._apply_library_filter()
+        self._update_section_visibility()
+
+    def _apply_library_filter(self):
+        """Hide library rows whose title doesn't contain the query
+        (case-insensitive). Albums also match by artist name."""
+        query = self.current_filter_text
+
+        def matches(*haystacks):
+            if not query:
+                return True
+            for h in haystacks:
+                if h and query in h.lower():
+                    return True
+            return False
+
+        def album_artist_str(album):
+            if not isinstance(album, dict):
+                return ""
+            artists = album.get("artists") or []
+            if isinstance(artists, list):
+                return ", ".join(
+                    a.get("name", "") for a in artists if isinstance(a, dict)
+                )
+            return str(artists or "")
+
+        row = self.playlists_list.get_row_at_index(0)
+        while row:
+            row.set_visible(matches(getattr(row, "playlist_title", "")))
+            row = row.get_next_sibling()
+
+        row = self.albums_list.get_row_at_index(0)
+        while row:
+            album = getattr(row, "album_data", None)
+            title = album.get("title", "") if isinstance(album, dict) else ""
+            row.set_visible(matches(title, album_artist_str(album)))
+            row = row.get_next_sibling()
+
+        row = self.artists_list.get_row_at_index(0)
+        while row:
+            row.set_visible(matches(getattr(row, "artist_name", "")))
+            row = row.get_next_sibling()
+
+        # Mirror the filter into the desktop FlowBox grids if they exist.
+        # Album cards store their `album_data` so artists can be matched too.
+        for grid_attr in ("playlists_grid", "albums_grid", "artists_grid"):
+            grid = getattr(self, grid_attr, None)
+            if grid is None:
+                continue
+            child = grid.get_first_child()
+            while child:
+                title = getattr(child, "_search_title", "")
+                album = getattr(child, "_album_data", None)
+                child.set_visible(matches(title, album_artist_str(album)))
+                child = child.get_next_sibling()
+
+    def _update_section_visibility(self):
+        """Hide whole sections (header + list) whose data is empty — both
+        because the user has nothing in that category and because the active
+        filter matches nothing in it."""
+
+        def any_visible(container):
+            child = container.get_first_child() if container is not None else None
+            while child:
+                if child.get_visible():
+                    return True
+                child = child.get_next_sibling()
+            return False
+
+        sections = [
+            (self.playlists_section, self.playlists_list, self.playlists_grid),
+            (self.albums_section, self.albums_list, self.albums_grid),
+            (self.artists_section, self.artists_list, self.artists_grid),
+        ]
+        for section, list_w, grid_w in sections:
+            has_any = any_visible(list_w) or any_visible(grid_w)
+            section.set_visible(has_any)
+
+    def _apply_library_layout(self, compact):
+        """Show the mobile ListBox or the desktop FlowBox grid for each section.
+
+        The chosen mode comes from an explicit user pref ("list"/"grid") if
+        set, otherwise auto-selects based on compact state."""
+        user_mode = _get_library_view_mode_pref()
+        if user_mode == "list":
+            show_grid = False
+        elif user_mode == "grid":
+            show_grid = True
+        else:
+            show_grid = not compact
+
+        pairs = [
+            (getattr(self, "playlists_list", None), getattr(self, "playlists_grid", None)),
+            (getattr(self, "albums_list", None), getattr(self, "albums_grid", None)),
+            (getattr(self, "artists_list", None), getattr(self, "artists_grid", None)),
+        ]
+        for list_w, grid_w in pairs:
+            if list_w is not None:
+                list_w.set_visible(not show_grid)
+            if grid_w is not None:
+                grid_w.set_visible(show_grid)
+        # Mirror into Uploads so the pref covers both sub-tabs.
+        if hasattr(self, "uploads_page") and hasattr(self.uploads_page, "_apply_layout_pref"):
+            self.uploads_page._apply_layout_pref()
+        self._update_section_visibility()
+
+    def _after_data_update(self):
+        """Run after any update_* populates widgets — re-apply filter and
+        recompute section visibility. Idle-scheduled so list/grid mutations
+        settle first."""
+        self._apply_library_filter()
+        self._update_section_visibility()
+        return False  # one-shot idle
+
+    # ── Desktop grid ──────────────────────────────────────────────────────
+
+    def _clear_flowbox(self, flowbox):
+        child = flowbox.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            flowbox.remove(child)
+            child = nxt
+
+    def _make_card_base(self, title, subtitle, thumb_url, fallback_icon):
+        return _make_library_card(self.player, title, subtitle, thumb_url, fallback_icon)
+
+    @staticmethod
+    def _build_overlay_loader(text):
+        """Centered spinner + caption label, hidden by default. Used as
+        Gtk.Overlay children that float above the scrolled content so
+        they always land mid-viewport regardless of content height."""
+        wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        wrap.set_vexpand(True)
+        wrap.set_valign(Gtk.Align.CENTER)
+        wrap.set_halign(Gtk.Align.CENTER)
+        spinner = Adw.Spinner()
+        spinner.set_size_request(48, 48)
+        wrap.append(spinner)
+        lbl = Gtk.Label(label=text)
+        lbl.add_css_class("caption")
+        wrap.append(lbl)
+        wrap.set_visible(False)
+        return wrap
+
+    def _attach_right_click(self, widget, handler):
+        """Wire right-click + long-press on a FlowBoxChild so its
+        context menu matches what list-view rows get."""
+        click = Gtk.GestureClick()
+        click.set_button(3)
+        click.connect("released", handler, widget)
+        widget.add_controller(click)
+
+        lp = Gtk.GestureLongPress()
+        lp.connect(
+            "pressed",
+            lambda g, x, y, w=widget: handler(g, 1, x, y, w),
+        )
+        widget.add_controller(lp)
+
+    @staticmethod
+    def _index_flowbox(flowbox, id_attr):
+        """Map stored id → existing FlowBoxChild so we can update rather than
+        recreate on subsequent refreshes. Avoids the placeholder-icon flash
+        when returning to the Library after visiting a playlist."""
+        index = {}
+        child = flowbox.get_first_child()
+        while child:
+            key = getattr(child, id_attr, None)
+            if key:
+                index[key] = child
+            child = child.get_next_sibling()
+        return index
+
+    @staticmethod
+    def _update_card_text(card, title, subtitle):
+        """Update an existing card's title + subtitle labels in place."""
+        outer = card.get_child()
+        if not outer:
+            return
+        # children: wrapper (card-wrapped image), title_clamp, [subtitle_clamp]
+        clamp = outer.get_first_child()
+        if clamp is None:
+            return
+        clamp = clamp.get_next_sibling()  # skip image wrapper
+        if clamp is not None:
+            lbl = clamp.get_child() if hasattr(clamp, "get_child") else None
+            if isinstance(lbl, Gtk.Label) and lbl.get_label() != title:
+                lbl.set_label(title)
+                lbl.set_tooltip_text(title)
+            card._search_title = title
+        sub_clamp = clamp.get_next_sibling() if clamp is not None else None
+        if sub_clamp is not None:
+            sub_lbl = sub_clamp.get_child() if hasattr(sub_clamp, "get_child") else None
+            if isinstance(sub_lbl, Gtk.Label) and sub_lbl.get_label() != (subtitle or ""):
+                sub_lbl.set_label(subtitle or "")
+
+    def _reconcile_grid(self, flowbox, items, id_attr, build_card):
+        """Reuse existing cards for known ids, build cards for new items,
+        remove cards whose ids are gone. `build_card(item) -> FlowBoxChild`
+        is called only for genuinely-new items."""
+        existing = self._index_flowbox(flowbox, id_attr)
+        processed = set()
+        desired_order = []
+
+        for item in items:
+            card = build_card(item, existing)
+            if card is None:
+                continue
+            desired_order.append(card)
+            key = getattr(card, id_attr, None)
+            if key:
+                processed.add(key)
+
+        # Remove stale cards.
+        for key, card in existing.items():
+            if key not in processed:
+                flowbox.remove(card)
+
+        # Re-order: walk the flowbox and move children that are out of order.
+        # FlowBox doesn't have a native reorder, so we remove + re-append for
+        # mismatched positions. That's acceptable — only changed slots move.
+        for expected_idx, card in enumerate(desired_order):
+            actual = flowbox.get_child_at_index(expected_idx)
+            if actual is not card:
+                if card.get_parent() is flowbox:
+                    flowbox.remove(card)
+                flowbox.insert(card, expected_idx)
+
+    def _rebuild_playlists_grid(self, playlists):
+        from ui.utils import is_online
+
+        offline = not is_online()
+
+        def build(p, existing):
+            p_id = p.get("playlistId")
+            if not p_id:
+                return None
+            title = p.get("title", "Unknown")
+            count = p.get("count") or p.get("itemCount", "")
+            if len(p_id) == 2:
+                subtitle = "Automatic Playlist"
+            else:
+                subtitle = f"{count} songs" if count and "songs" not in str(count) else str(count or "")
+
+            thumbnails = p.get("thumbnails", [])
+            thumb_url = thumbnails[-1]["url"] if thumbnails else None
+            # Prefer the locally-cached playlist cover for instant render.
+            # When a remote URL is available, fire a background refresh
+            # of the on-disk copy so edits on YT propagate — the shared
+            # helper dedupes so the grid rebuild doesn't spawn duplicate
+            # downloads for the same playlist.
+            from player.downloads import get_music_dir, _sanitize_filename
+
+            cover_path = os.path.join(
+                get_music_dir(), "playlists", f"{_sanitize_filename(title)}.jpg"
+            )
+            has_local = os.path.exists(cover_path)
+            if not offline and thumb_url:
+                from ui.utils import save_playlist_cover_async
+                save_playlist_cover_async(self.player, title, thumb_url)
+            if has_local:
+                thumb_url = f"file://{cover_path}"
+
+            is_owned = self.client.is_own_playlist(p, playlist_id=p_id)
+
+            card = existing.get(p_id)
+            if card is not None:
+                self._update_card_text(card, title, subtitle)
+                card._playlist_data = p
+                card.playlist_title = title
+                card.playlist_count = count
+                card.is_owned = is_owned
+                # Only reload the thumbnail if the URL actually changed,
+                # otherwise the current cover stays visible (no placeholder).
+                img = getattr(card, "_cover_img", None)
+                if img is not None and thumb_url and img.url != thumb_url:
+                    img.load_url(thumb_url)
+                return card
+            card = self._make_card_base(
+                title, subtitle, thumb_url, "media-playlist-audio-symbolic"
+            )
+            card._playlist_id = p_id
+            card._playlist_data = p
+            # Attributes consumed by on_row_right_click / _confirm_delete.
+            card.playlist_id = p_id
+            card.playlist_title = title
+            card.playlist_count = count
+            card.is_owned = is_owned
+            self._attach_right_click(card, self.on_row_right_click)
+            return card
+
+        self._reconcile_grid(self.playlists_grid, playlists, "_playlist_id", build)
+
+    def _rebuild_albums_grid(self, albums):
+        def build(album, existing):
+            browse_id = album.get("browseId", "")
+            if not browse_id:
+                return None
+            title = album.get("title", "Unknown")
+            artists = album.get("artists", [])
+            artist_str = ", ".join(
+                a.get("name", "") for a in artists if isinstance(a, dict)
+            )
+            year = album.get("year", "")
+            subtitle_parts = [p for p in [artist_str, str(year) if year else ""] if p]
+            subtitle = " • ".join(subtitle_parts)
+            thumbnails = album.get("thumbnails", [])
+            thumb_url = thumbnails[-1]["url"] if thumbnails else None
+
+            card = existing.get(browse_id)
+            if card is not None:
+                self._update_card_text(card, title, subtitle)
+                card._album_data = album
+                card.album_data = album
+                img = getattr(card, "_cover_img", None)
+                if img is not None and thumb_url and img.url != thumb_url:
+                    img.load_url(thumb_url)
+                return card
+            card = self._make_card_base(
+                title, subtitle, thumb_url, "media-optical-symbolic"
+            )
+            card._album_id = browse_id
+            card._album_data = album
+            # Attributes consumed by on_album_right_click.
+            card.album_id = browse_id
+            card.album_data = album
+            self._attach_right_click(card, self.on_album_right_click)
+            return card
+
+        self._reconcile_grid(self.albums_grid, albums, "_album_id", build)
+
+    def _rebuild_artists_grid(self, artists):
+        def build(a, existing):
+            a_id = a.get("browseId")
+            if not a_id:
+                return None
+            name = a.get("artist", "Unknown")
+            subscribers = a.get("subscribers", "")
+            if subscribers and "subscribers" not in subscribers.lower():
+                subscribers = f"{subscribers} subscribers"
+            thumbnails = a.get("thumbnails", [])
+            thumb_url = thumbnails[-1]["url"] if thumbnails else None
+
+            card = existing.get(a_id)
+            if card is not None:
+                self._update_card_text(card, name, subscribers)
+                card._artist_name = name
+                img = getattr(card, "_cover_img", None)
+                if img is not None and thumb_url and img.url != thumb_url:
+                    img.load_url(thumb_url)
+                return card
+            card = self._make_card_base(
+                name, subscribers, thumb_url, "avatar-default-symbolic"
+            )
+            card._artist_id = a_id
+            card._artist_name = name
+            return card
+
+        self._reconcile_grid(self.artists_grid, artists, "_artist_id", build)
+
+    def _on_playlist_grid_activated(self, flowbox, child):
+        p_id = getattr(child, "_playlist_id", None)
+        if not p_id:
+            return
+        initial_data = {
+            "title": getattr(child, "_search_title", None),
+            "thumb": child._cover_img.url if hasattr(child, "_cover_img") else None,
+        }
+        self.open_playlist_callback(p_id, initial_data)
+
+    def _on_album_grid_activated(self, flowbox, child):
+        if not hasattr(child, "_album_id"):
+            return
+        album = getattr(child, "_album_data", {})
+        initial_data = {
+            "title": album.get("title", ""),
+            "thumb": album.get("thumbnails", [{}])[-1].get("url")
+            if album.get("thumbnails")
+            else None,
+        }
+        self.open_playlist_callback(child._album_id, initial_data)
+
+    def _on_artist_grid_activated(self, flowbox, child):
+        if not hasattr(child, "_artist_id"):
+            return
+        root = self.get_root()
+        if hasattr(root, "open_artist"):
+            root.open_artist(child._artist_id, getattr(child, "_artist_name", None))
+
     def _propagate_compact(self, widget, compact):
         if hasattr(widget, 'set_compact') and hasattr(widget, 'target_size'):
             widget.set_compact(compact)
@@ -243,19 +843,24 @@ class LibraryPage(Adw.Bin):
         while row := self.playlists_list.get_row_at_index(0):
             self.playlists_list.remove(row)
 
-    def load_library(self):
+    def load_library(self, silent=False):
+        """Fetch library data in the background.
+
+        `silent=True` skips the full-screen "loading" overlay (used by the
+        manual refresh button — we show a small inline spinner instead)."""
         if self._is_loading:
             return
         self._is_loading = True
-        thread = threading.Thread(target=self._fetch_library)
+        thread = threading.Thread(target=self._fetch_library, args=(silent,))
         thread.daemon = True
         thread.start()
 
-    def _fetch_library(self):
+    def _fetch_library(self, silent=False):
         try:
-            # Only show loading UI if we have no data at all
-            if self.playlists_list.get_row_at_index(0) is None:
-                GLib.idle_add(self.stack.set_visible_child_name, "loading")
+            # Only show full-screen loading UI if we have no data at all and
+            # the caller didn't explicitly opt out.
+            if not silent and self.playlists_list.get_row_at_index(0) is None:
+                GLib.idle_add(self._loading_wrap.set_visible, True)
 
             playlists = self.client.get_library_playlists()
             albums = self.client.get_library_albums()
@@ -264,10 +869,19 @@ class LibraryPage(Adw.Bin):
             GObject.idle_add(self.update_playlists, playlists if playlists else [])
             GObject.idle_add(self.update_albums, albums if albums else [])
             GObject.idle_add(self.update_artists, artists if artists else [])
-            GLib.idle_add(self.stack.set_visible_child_name, "root")
+            GLib.idle_add(self._loading_wrap.set_visible, False)
             GLib.idle_add(self._apply_offline_state)
         finally:
             self._is_loading = False
+            GLib.idle_add(self._on_refresh_finished)
+
+    def _on_refresh_finished(self):
+        # Notify the MainWindow-owned refresh button (in the header bar)
+        # so it can hide its inline spinner and re-enable itself.
+        root = self.get_root()
+        if root and hasattr(root, "_on_library_refresh_finished"):
+            root._on_library_refresh_finished()
+        return False
 
     def update_playlists(self, playlists):
         # Sort: 2-letter IDs first (Automatic Playlists like LM, SE, etc.)
@@ -276,6 +890,9 @@ class LibraryPage(Adw.Bin):
             return 0 if len(pid) == 2 else 1
 
         playlists.sort(key=sort_key)
+        self._rebuild_playlists_grid(playlists)
+        # Re-run filter + section visibility in case we came from a search state.
+        GLib.idle_add(self._after_data_update)
 
         # 1. Map existing rows by playlist_id
         existing_rows = {}
@@ -424,6 +1041,8 @@ class LibraryPage(Adw.Bin):
                 self.playlists_list.remove(row)
 
     def update_albums(self, albums):
+        self._rebuild_albums_grid(albums)
+        GLib.idle_add(self._after_data_update)
         # Map existing rows
         existing_rows = {}
         row = self.albums_list.get_row_at_index(0)
@@ -662,6 +1281,44 @@ class LibraryPage(Adw.Bin):
             tracks=tracks,
         )
 
+    def _open_history_page(self):
+        """Push the dedicated HistoryPage (grouped by when each track
+        was played, mirroring YT Music's Verlauf view)."""
+        from ui.utils import is_online
+
+        def _toast(msg):
+            root = self.get_root()
+            if root and hasattr(root, "add_toast"):
+                root.add_toast(msg)
+
+        if not is_online():
+            _toast("History requires an internet connection")
+            return
+        if not self.player.client.is_authenticated():
+            _toast("Sign in to view listening history")
+            return
+
+        nav = None
+        parent = self.get_parent()
+        while parent:
+            if isinstance(parent, Adw.NavigationView):
+                nav = parent
+                break
+            parent = parent.get_parent()
+        if not nav:
+            return
+
+        from ui.pages.history import HistoryPage
+        page = HistoryPage(self.player)
+
+        root = self.get_root()
+        if root and getattr(root, "_is_compact", False):
+            page.set_compact_mode(True)
+
+        nav_page = Adw.NavigationPage(child=page, title="Listening History")
+        nav.push(nav_page)
+        page.load()
+
     def _on_upload_clicked(self, btn):
         # Call uploads page but pass our root window since uploads tab might not be visible
         self.uploads_page._do_open_file_picker(self.get_root())
@@ -670,6 +1327,13 @@ class LibraryPage(Adw.Bin):
         is_uploads = stack.get_visible_child_name() == "uploads"
         self.uploads_actions_box.set_visible(is_uploads)
         self.lib_actions_box.set_visible(not is_uploads)
+        # Sync the uploads overlay visibility to the tab: if an upload
+        # fetch is in flight and the user switches to this tab, reveal
+        # the spinner; if they switch away, hide it so it doesn't show
+        # on top of the library content.
+        self._uploads_loading_wrap.set_visible(
+            is_uploads and self._uploads_loading_pending
+        )
         if is_uploads:
             # Refresh uploads every time the tab is revealed
             self.uploads_page.load()
@@ -854,6 +1518,8 @@ class LibraryPage(Adw.Bin):
         threading.Thread(target=thread_func, daemon=True).start()
 
     def update_artists(self, artists):
+        self._rebuild_artists_grid(artists)
+        GLib.idle_add(self._after_data_update)
         # 1. Map existing rows by browse_id
         existing_rows = {}
         row = self.artists_list.get_row_at_index(0)
@@ -1029,65 +1695,72 @@ class UploadsPage(Gtk.Box):
         self.player = player
         self.client = client
         self.open_playlist_callback = open_playlist_callback
-
-        self._stack = Gtk.Stack()
-        self._stack.set_vexpand(True)
-        self.append(self._stack)
-
-        # Loading page
-        loading_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        loading_box.set_valign(Gtk.Align.CENTER)
-        loading_box.set_halign(Gtk.Align.CENTER)
-        loading_box.set_vexpand(True)
-        loading_box.set_hexpand(True)
-        loading_spinner = Adw.Spinner()
-        loading_spinner.set_size_request(32, 32)
-        loading_box.append(loading_spinner)
-        loading_label = Gtk.Label(label="Loading uploads...")
-        loading_label.add_css_class("caption")
-        loading_label.add_css_class("dim-label")
-        loading_box.append(loading_label)
-        self._stack.add_named(loading_box, "loading")
+        # LibraryPage owns the loading spinner for this tab — it floats
+        # on a main-box-level Gtk.Overlay that reliably centres in the
+        # viewport, which the deeper Uploads-internal positioning
+        # couldn't achieve.
+        self._set_loading_cb = None
 
         # Content page
         self.content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        self.content_box.set_vexpand(True)
+        self.append(self.content_box)
 
         # Albums section
-        albums_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.albums_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         albums_label = Gtk.Label(label="Albums")
         albums_label.add_css_class("heading")
         albums_label.set_halign(Gtk.Align.START)
-        albums_section.append(albums_label)
+        self.albums_section.append(albums_label)
 
         self.albums_list = Gtk.ListBox()
         self.albums_list.set_selection_mode(Gtk.SelectionMode.NONE)
         self.albums_list.add_css_class("boxed-list")
         self.albums_list.connect("row-activated", self._on_album_activated)
-        albums_section.append(self.albums_list)
-        self.content_box.append(albums_section)
+        self.albums_section.append(self.albums_list)
+
+        self.albums_grid = _make_flow_grid()
+        self.albums_grid.connect("child-activated", self._on_album_grid_activated)
+        self.albums_section.append(self.albums_grid)
+        self.content_box.append(self.albums_section)
 
         # Artists section
-        artists_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.artists_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         artists_label = Gtk.Label(label="Artists")
         artists_label.add_css_class("heading")
         artists_label.set_halign(Gtk.Align.START)
-        artists_section.append(artists_label)
+        self.artists_section.append(artists_label)
 
         self.artists_list = Gtk.ListBox()
         self.artists_list.set_selection_mode(Gtk.SelectionMode.NONE)
         self.artists_list.add_css_class("boxed-list")
         self.artists_list.connect("row-activated", self._on_artist_activated)
-        artists_section.append(self.artists_list)
-        self.content_box.append(artists_section)
+        self.artists_section.append(self.artists_list)
+
+        self.artists_grid = _make_flow_grid()
+        self.artists_grid.connect("child-activated", self._on_artist_grid_activated)
+        self.artists_section.append(self.artists_grid)
+        self.content_box.append(self.artists_section)
+
+        # Filter state driven by parent LibraryPage.filter_content().
+        self.current_filter_text = ""
 
         self.empty_label = Gtk.Label(label="No uploaded music")
         self.empty_label.add_css_class("dim-label")
         self.empty_label.set_visible(False)
         self.content_box.append(self.empty_label)
 
-        self._stack.add_named(self.content_box, "content")
-        self._stack.set_visible_child_name("loading")
+        # Initial loading state is owned by the parent LibraryPage; it
+        # flips the overlay's visibility via `set_loading_cb(...)`.
 
+
+    def set_loading_cb(self, cb):
+        """Wire a callback that flips the parent's overlay spinner."""
+        self._set_loading_cb = cb
+
+    def _set_loading(self, loading):
+        if self._set_loading_cb:
+            self._set_loading_cb(loading)
 
     def set_compact_mode(self, compact):
         if compact:
@@ -1106,27 +1779,94 @@ class UploadsPage(Gtk.Box):
             self._propagate_compact(child, compact)
             child = child.get_next_sibling()
 
+    def filter_content(self, text):
+        """Called by LibraryPage.filter_content when the global search bar
+        types on the Library tab. Filters uploaded albums/artists by title
+        and hides sections that end up empty."""
+        self.current_filter_text = (text or "").strip().lower()
+        query = self.current_filter_text
+
+        def matches(title):
+            return (not query) or (query in (title or "").lower())
+
+        row = self.albums_list.get_row_at_index(0)
+        while row:
+            title = getattr(row, "album_title", None)
+            if title is None and hasattr(row, "album_data"):
+                title = row.album_data.get("title", "")
+            row.set_visible(matches(title))
+            row = row.get_next_sibling()
+
+        row = self.artists_list.get_row_at_index(0)
+        while row:
+            name = ""
+            data = getattr(row, "artist_data", None)
+            if data:
+                name = data.get("artist") or data.get("name") or ""
+            if not name:
+                name = getattr(row, "artist_name", "")
+            row.set_visible(matches(name))
+            row = row.get_next_sibling()
+
+        self._update_section_visibility()
+
+    def _update_section_visibility(self):
+        def any_visible(container):
+            child = container.get_row_at_index(0)
+            while child:
+                if child.get_visible():
+                    return True
+                child = child.get_next_sibling()
+            return False
+
+        self.albums_section.set_visible(any_visible(self.albums_list))
+        self.artists_section.set_visible(any_visible(self.artists_list))
+
     def load(self):
         from ui.utils import is_online
-        if not is_online():
-            self._stack.set_visible_child_name("content")
-            self.empty_label.set_label("Uploads require an internet connection")
-            self.empty_label.set_visible(True)
-            return
-        # Only show loading screen if we have no content yet (first load)
-        has_content = self.albums_list.get_row_at_index(0) is not None or self.artists_list.get_row_at_index(0) is not None
+        from player.downloads import get_download_db
+
+        # Optimistic render from the disk cache so Uploads opens instantly
+        # just like the main Library sections do. The live fetch happens
+        # in the background and replaces the rows when done.
+        has_content = (
+            self.albums_list.get_row_at_index(0) is not None
+            or self.artists_list.get_row_at_index(0) is not None
+        )
         if not has_content:
-            self._stack.set_visible_child_name("loading")
+            try:
+                cached_albums, cached_artists = get_download_db().get_cached_uploads()
+            except Exception:
+                cached_albums, cached_artists = None, None
+            if cached_albums or cached_artists:
+                self._display(cached_albums or [], cached_artists or [])
+                has_content = True
+
+        if not is_online():
+            if not has_content:
+                self._set_loading(False)
+                self.empty_label.set_label("Uploads require an internet connection")
+                self.empty_label.set_visible(True)
+            return
+        if not has_content:
+            self._set_loading(True)
         self.empty_label.set_visible(False)
         threading.Thread(target=self._fetch, daemon=True).start()
 
     def _fetch(self):
         albums = self.client.get_library_upload_albums(limit=100)
         artists = self.client.get_library_upload_artists(limit=100)
+        # Persist for the next launch's optimistic render.
+        try:
+            from player.downloads import get_download_db
+
+            get_download_db().cache_uploads(albums or [], artists or [])
+        except Exception as e:
+            print(f"[UPLOADS] cache write failed: {e}")
         GLib.idle_add(self._display, albums or [], artists or [])
 
     def _display(self, albums, artists):
-        self._stack.set_visible_child_name("content")
+        self._set_loading(False)
 
         # Clear existing
         while row := self.albums_list.get_row_at_index(0):
@@ -1136,11 +1876,100 @@ class UploadsPage(Gtk.Box):
 
         if not albums and not artists:
             self.empty_label.set_visible(True)
+            self._update_section_visibility()
             return
 
         self.empty_label.set_visible(False)
         self._display_artists(artists)
         self._display_albums(albums)
+        # Rebuild the desktop grid counterparts from the same data.
+        self._rebuild_uploads_grids(albums, artists)
+        # Honour the current library layout pref + active filter.
+        self._apply_layout_pref()
+        if self.current_filter_text:
+            self.filter_content(self.current_filter_text)
+        else:
+            self._update_section_visibility()
+
+    def _apply_layout_pref(self):
+        """Show ListBox or FlowBox based on the shared library pref."""
+        mode = _get_library_view_mode_pref()
+        root = self.get_root()
+        compact = bool(getattr(root, "_is_compact", False)) if root else False
+        if mode == "list":
+            show_grid = False
+        elif mode == "grid":
+            show_grid = True
+        else:
+            show_grid = not compact
+        self.albums_list.set_visible(not show_grid)
+        self.artists_list.set_visible(not show_grid)
+        self.albums_grid.set_visible(show_grid)
+        self.artists_grid.set_visible(show_grid)
+
+    def _rebuild_uploads_grids(self, albums, artists):
+        for grid in (self.albums_grid, self.artists_grid):
+            child = grid.get_first_child()
+            while child:
+                nxt = child.get_next_sibling()
+                grid.remove(child)
+                child = nxt
+
+        for album in albums:
+            title = album.get("title", "Unknown")
+            raw_artists = album.get("artists") or []
+            artist_str = ", ".join(
+                a.get("name", "") for a in raw_artists if isinstance(a, dict)
+            )
+            if not artist_str:
+                artist_str = album.get("artist", "") or ""
+            thumbs = album.get("thumbnails") or []
+            thumb_url = thumbs[-1]["url"] if thumbs else None
+            card = _make_library_card(
+                self.player, title, artist_str, thumb_url, "media-optical-symbolic"
+            )
+            card._album_data = album
+            self.albums_grid.append(card)
+
+        for artist in artists:
+            name = artist.get("artist", artist.get("name", "Unknown"))
+            song_count = artist.get("songs")
+            subtitle = f"{song_count} songs" if song_count else ""
+            thumbs = artist.get("thumbnails") or []
+            thumb_url = thumbs[-1]["url"] if thumbs else None
+            card = _make_library_card(
+                self.player, name, subtitle, thumb_url, "avatar-default-symbolic"
+            )
+            card._artist_data = artist
+            self.artists_grid.append(card)
+
+    def _on_album_grid_activated(self, flowbox, child):
+        album = getattr(child, "_album_data", None)
+        if not album:
+            return
+        # Defer to the list-row handler's logic.
+        browse_id = album.get("browseId")
+        if not browse_id:
+            return
+        self.open_playlist_callback(
+            browse_id,
+            {
+                "title": album.get("title", ""),
+                "thumb": (album.get("thumbnails") or [{}])[-1].get("url"),
+            },
+        )
+
+    def _on_artist_grid_activated(self, flowbox, child):
+        artist = getattr(child, "_artist_data", None)
+        if not artist:
+            return
+        browse_id = artist.get("browseId")
+        name = artist.get("artist") or artist.get("name")
+        if not browse_id:
+            return
+        root = self.get_root()
+        if root and hasattr(root, "open_artist"):
+            root.open_artist(browse_id, name)
 
     def _display_artists(self, artists):
         from ui.utils import AsyncPicture

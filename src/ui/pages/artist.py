@@ -107,6 +107,11 @@ class ArtistPage(Adw.Bin):
         self.name_label.add_css_class("title-1")
         self.name_label.set_halign(Gtk.Align.START)
         self.name_label.add_css_class("banner-text")  # Still white with shadow
+        # Long artist names should wrap to a second line instead of being
+        # clipped off the edge of the banner.
+        self.name_label.set_wrap(True)
+        self.name_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.name_label.set_xalign(0.0)
         self.info_overlay_box.append(self.name_label)
 
         self.subscribers_label = Gtk.Label(label="")

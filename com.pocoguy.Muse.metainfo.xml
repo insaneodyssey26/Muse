@@ -79,6 +79,28 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="2026-23-04.0" date="2026-04-23">
+      <description>
+        <p>Major feature update with UI changes, history, and more.</p>
+        <ul>
+          <li>Complete UI overhaul for better desktop experience and consistent maximum width for the view contents</li>
+          <li>History implemented</li>
+          <li>New Avatar icon replaces the hamburger menu</li>
+          <li>Discord RPC: added more options in the settings to customize appearence</li>
+          <li>Play Next and Add to Queue options in song context menus, playlist row context menus, and playlist/album header menus</li>
+          <li>More caching for better performance and responsiveness</li>
+          <li>Added preferences to change renderer in case of GPU acceleration issues</li>
+          <li>Added preference to control sidebar position (left/right).</li>
+          <li>Added preference for folder structure in downloads.</li>
+          <li>Added ability to search within library</li>
+          <li>Added ability to change between grid and list view for library</li>
+          <li>Fixed bug where download would override M3U with incomplete tracklist</li>
+          <li>Added expanded cover view for large screens</li>
+          <li>Added refresh to some pages</li> 
+          <li>Smaller fixes</li>
+        </ul>
+      </description>
+    </release>
     <release version="2026-18-04.0" date="2026-04-18">
       <description>
         <p>New app icon, Discord RPC improvements, queue management, and bug fixes.</p>

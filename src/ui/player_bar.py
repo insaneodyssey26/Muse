@@ -85,7 +85,9 @@ class PlayerBar(Gtk.Box):
         self.artist_label = Gtk.Label(label="")
         self.artist_label.set_ellipsize(3)  # END
         self.artist_label.set_width_chars(1)  # Allow shrinking fully
-        self.artist_label.set_max_width_chars(22)  # Reverted to 22 (less aggressive)
+        # No `max_width_chars` — only ellipsize when layout actually runs
+        # out of space, otherwise the label was being truncated even when
+        # the meta box had plenty of room.
         self.artist_label.add_css_class("caption")
 
         self.artist_btn.set_child(self.artist_label)
@@ -186,11 +188,28 @@ class PlayerBar(Gtk.Box):
 
         controls_box.append(self.queue_btn)
 
-        # Like Button (right side, always visible when track loaded)
+        # Like Button (right side, always visible when track loaded).
+        # Square (not circular) here so it matches the other player-bar
+        # controls — LikeButton adds `circular` by default.
         self.like_btn = LikeButton(self.player.client, None)
+        self.like_btn.remove_css_class("circular")
         self.like_btn.set_visible(False)
         self.like_btn.set_valign(Gtk.Align.CENTER)
         controls_box.append(self.like_btn)
+
+        # Expand/collapse button — desktop equivalent of tapping the bar
+        # on mobile. Sits at the far right (after Like) to mirror YT
+        # Music's own chevron placement. Hidden on compact because the
+        # bar itself is tappable there. Icon flips between up- and
+        # down-chevron via `set_expanded`.
+        self.expand_btn = Gtk.Button(icon_name="go-up-symbolic")
+        self.expand_btn.set_valign(Gtk.Align.CENTER)
+        self.expand_btn.add_css_class("flat")
+        self.expand_btn.set_tooltip_text("Expand player")
+        self.expand_btn.connect(
+            "clicked", lambda _b: self.emit("expand-requested")
+        )
+        controls_box.append(self.expand_btn)
 
         content_box.append(controls_box)
         self.content_box = content_box
@@ -242,6 +261,7 @@ class PlayerBar(Gtk.Box):
             self.next_btn.set_visible(False)
             self.volume_container.set_visible(False)
             self.queue_btn.set_visible(False)
+            self.expand_btn.set_visible(False)
             self.scale.add_css_class("compact")
 
             # Tighten mobile layout
@@ -258,6 +278,7 @@ class PlayerBar(Gtk.Box):
             self.next_btn.set_visible(True)
             self.volume_container.set_visible(True)
             self.queue_btn.set_visible(True)
+            self.expand_btn.set_visible(True)
             self.scale.remove_css_class("compact")
             self.like_btn.set_visible(bool(self.player.current_video_id))
 
@@ -268,6 +289,16 @@ class PlayerBar(Gtk.Box):
             self.content_box.set_margin_bottom(10)
             self.content_box.set_spacing(10)
             self.controls_box.set_spacing(10)
+
+    def set_expanded(self, expanded):
+        """Flip the expand button's chevron — down when the cover view
+        is open (next click collapses), up when it's not."""
+        if expanded:
+            self.expand_btn.set_icon_name("go-down-symbolic")
+            self.expand_btn.set_tooltip_text("Collapse player")
+        else:
+            self.expand_btn.set_icon_name("go-up-symbolic")
+            self.expand_btn.set_tooltip_text("Expand player")
 
     def _on_artist_btn_clicked(self, btn):
         if self.on_artist_click:

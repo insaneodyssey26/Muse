@@ -28,6 +28,16 @@ FORMATS = {
 
 DEFAULT_FORMAT = "opus"
 
+# Folder layout options for downloaded files, relative to the music dir.
+FOLDER_STRUCTURES = ("artist_album", "artist", "flat")
+DEFAULT_FOLDER_STRUCTURE = "artist_album"
+
+# Temp-dir prefix lets us identify our own crash debris at startup without
+# trampling unrelated files in /tmp.
+TMP_PREFIX = "mixtapes_dl_"
+TMP_STALE_SECONDS = 3600  # only sweep dirs untouched for an hour — avoids
+                          # clobbering a parallel running instance's work.
+
 
 def _sanitize_filename(name):
     """Remove characters that are invalid in filenames."""
@@ -65,6 +75,36 @@ def set_preferred_format(fmt):
         prefs = _get_prefs()
         prefs["download_format"] = fmt
         _save_prefs(prefs)
+
+
+def get_folder_structure():
+    val = _get_prefs().get("download_folder_structure", DEFAULT_FOLDER_STRUCTURE)
+    return val if val in FOLDER_STRUCTURES else DEFAULT_FOLDER_STRUCTURE
+
+
+def set_folder_structure(structure):
+    """Returns True if the structure pref was actually changed."""
+    if structure not in FOLDER_STRUCTURES:
+        return False
+    prefs = _get_prefs()
+    if prefs.get("download_folder_structure", DEFAULT_FOLDER_STRUCTURE) == structure:
+        return False
+    prefs["download_folder_structure"] = structure
+    _save_prefs(prefs)
+    return True
+
+
+def _build_download_dir(music_dir, artist_str, album, structure):
+    """Build the destination directory based on the chosen folder structure.
+
+    Falls back gracefully when album metadata is missing: 'artist_album'
+    degrades to 'artist' rather than creating an 'Unknown' bucket."""
+    if structure == "flat":
+        return music_dir
+    artist_dir = _sanitize_filename(artist_str.split(",")[0].strip())
+    if structure == "artist_album" and album:
+        return os.path.join(music_dir, artist_dir, _sanitize_filename(album))
+    return os.path.join(music_dir, artist_dir)
 
 
 def get_music_dir():
@@ -128,9 +168,15 @@ class DownloadDB:
                     author TEXT,
                     track_count INTEGER,
                     last_synced TEXT,
-                    tracks_json TEXT
+                    tracks_json TEXT,
+                    meta_json TEXT
                 )
             """)
+            # For DBs created before meta_json existed:
+            try:
+                conn.execute("ALTER TABLE library_cache ADD COLUMN meta_json TEXT")
+            except sqlite3.OperationalError:
+                pass
             conn.commit()
             conn.close()
 
@@ -192,28 +238,129 @@ class DownloadDB:
             conn.commit()
             conn.close()
 
-    # ── Library cache ────────────────────────────────────────────────────────
-
-    def cache_playlist(self, playlist_id, title, author, track_count, tracks):
-        """Cache a playlist's track listing for offline browsing."""
+    def update_file_path(self, video_id, new_path):
         with self._lock:
             conn = self._connect()
+            conn.execute(
+                "UPDATE downloads SET file_path = ? WHERE video_id = ?",
+                (new_path, video_id),
+            )
+            conn.commit()
+            conn.close()
+
+    def get_video_for_path(self, file_path):
+        """Return the video_id of whichever row owns `file_path`, or None."""
+        if not file_path:
+            return None
+        with self._lock:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT video_id FROM downloads WHERE file_path = ?", (file_path,)
+            ).fetchone()
+            conn.close()
+            return row[0] if row else None
+
+    # ── Library cache ────────────────────────────────────────────────────────
+
+    def _ensure_meta_json_column(self, conn):
+        """Add the meta_json column if this DB was created before we stored
+        rich playlist metadata. Safe to call repeatedly."""
+        try:
+            conn.execute("ALTER TABLE library_cache ADD COLUMN meta_json TEXT")
+        except sqlite3.OperationalError:
+            pass  # already exists
+
+    def cache_playlist(self, playlist_id, title, author, track_count, tracks, meta=None):
+        """Cache a playlist's track listing + rich metadata for offline
+        browsing and optimistic render on next open.
+
+        The cache is a prefetch — it must never regress. If an entry
+        already exists with MORE tracks than the incoming write, we keep
+        the existing one. That protects against partial fetches (e.g. an
+        initial limit=200 call overwriting a previously-stored full 810
+        track set). Callers that genuinely want to shrink the cache
+        (after a playlist edit) should explicitly invalidate first.
+
+        `meta` is an optional dict. If provided it's JSON-serialized into
+        the `meta_json` column and should contain fields like `description`,
+        `year`, `privacy`, `duration_seconds`, `thumbnails`, and
+        `author_raw` (the original artist-dict list)."""
+        # Never write the cache when offline — offline responses are
+        # themselves reconstructed from the cache, and persisting them
+        # would trigger the regression guard for legitimately-shrunken
+        # data (playlist edits) and overwrite meta fields with stale
+        # values.
+        try:
+            from ui.utils import is_online as _is_online
+            if not _is_online():
+                return
+        except Exception:
+            pass
+        with self._lock:
+            conn = self._connect()
+            self._ensure_meta_json_column(conn)
+
+            # Regression check — look up what's already cached.
+            existing_count = 0
+            try:
+                row = conn.execute(
+                    "SELECT tracks_json FROM library_cache WHERE playlist_id = ?",
+                    (playlist_id,),
+                ).fetchone()
+                if row and row[0]:
+                    existing_count = len(json.loads(row[0]))
+            except (json.JSONDecodeError, sqlite3.OperationalError):
+                existing_count = 0
+
+            new_count = len(tracks) if tracks else 0
+            if existing_count > new_count:
+                print(
+                    f"[DB] cache_playlist: skipping regression "
+                    f"({new_count} < existing {existing_count}) for {playlist_id}"
+                )
+                conn.close()
+                return
+
+            try:
+                meta_json = json.dumps(meta or {}, ensure_ascii=False)
+            except (TypeError, ValueError):
+                meta_json = "{}"
             conn.execute("""
                 INSERT OR REPLACE INTO library_cache
-                (playlist_id, title, author, track_count, last_synced, tracks_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (playlist_id, title, author, track_count, last_synced, tracks_json, meta_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 playlist_id, title, author, track_count,
                 time.strftime("%Y-%m-%dT%H:%M:%S"),
                 json.dumps(tracks, ensure_ascii=False) if tracks else "[]",
+                meta_json,
             ))
             conn.commit()
             conn.close()
 
-    def get_cached_playlist(self, playlist_id):
-        """Get cached playlist data. Returns dict or None."""
+    def invalidate_playlist_cache(self, playlist_id):
+        """Drop a playlist's cache row entirely. Callers that shrink the
+        playlist (delete songs, remove playlist from library) should call
+        this before writing a smaller entry — cache_playlist() ignores
+        regression writes otherwise."""
+        if not playlist_id:
+            return
         with self._lock:
             conn = self._connect()
+            try:
+                conn.execute(
+                    "DELETE FROM library_cache WHERE playlist_id = ?", (playlist_id,)
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_cached_playlist(self, playlist_id):
+        """Get cached playlist data. Returns dict or None. Dict has the
+        standard columns plus `tracks` (list) and `meta` (dict)."""
+        with self._lock:
+            conn = self._connect()
+            self._ensure_meta_json_column(conn)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT * FROM library_cache WHERE playlist_id = ?", (playlist_id,)
@@ -225,6 +372,10 @@ class DownloadDB:
                     result["tracks"] = json.loads(result.get("tracks_json", "[]"))
                 except (json.JSONDecodeError, TypeError):
                     result["tracks"] = []
+                try:
+                    result["meta"] = json.loads(result.get("meta_json") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    result["meta"] = {}
                 return result
             return None
 
@@ -275,6 +426,77 @@ class DownloadDB:
             except Exception:
                 conn.close()
             return None
+
+    def cache_history(self, tracks):
+        """Cache the listening-history track list so HistoryPage can
+        render instantly on next open while the fresh fetch runs."""
+        try:
+            from ui.utils import is_online as _is_online
+            if not _is_online():
+                return
+        except Exception:
+            pass
+        with self._lock:
+            conn = self._connect()
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS history_cache (
+                    id INTEGER PRIMARY KEY,
+                    data_json TEXT,
+                    last_synced TEXT
+                )
+            """)
+            conn.execute("DELETE FROM history_cache")
+            conn.execute("""
+                INSERT INTO history_cache (id, data_json, last_synced)
+                VALUES (1, ?, ?)
+            """, (
+                json.dumps(tracks, ensure_ascii=False),
+                time.strftime("%Y-%m-%dT%H:%M:%S"),
+            ))
+            conn.commit()
+            conn.close()
+
+    def get_cached_history(self):
+        """Return cached history tracks, or None if nothing is cached."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT data_json FROM history_cache WHERE id = 1"
+                ).fetchone()
+                conn.close()
+                if row:
+                    return json.loads(row[0])
+            except Exception:
+                conn.close()
+            return None
+
+    def remove_from_history_cache(self, video_id):
+        """Drop a single track from the cached history list. Used after
+        a user removes a history entry so the cache doesn't resurrect
+        the removed track on the next cold open."""
+        if not video_id:
+            return
+        cached = self.get_cached_history()
+        if not cached:
+            return
+        filtered = [t for t in cached if t.get("videoId") != video_id]
+        if len(filtered) == len(cached):
+            return
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    UPDATE history_cache
+                    SET data_json = ?, last_synced = ?
+                    WHERE id = 1
+                """, (
+                    json.dumps(filtered, ensure_ascii=False),
+                    time.strftime("%Y-%m-%dT%H:%M:%S"),
+                ))
+                conn.commit()
+            finally:
+                conn.close()
 
     def cache_library_albums(self, albums):
         """Cache the list of library albums."""
@@ -350,6 +572,50 @@ class DownloadDB:
                 conn.close()
             return None
 
+    # ── Uploads cache ────────────────────────────────────────────────────────
+
+    def cache_uploads(self, albums, artists):
+        """Cache the list of uploaded albums + artists."""
+        with self._lock:
+            conn = self._connect()
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS uploads_cache (
+                    id INTEGER PRIMARY KEY,
+                    albums_json TEXT,
+                    artists_json TEXT,
+                    last_synced TEXT
+                )
+            """)
+            conn.execute("DELETE FROM uploads_cache")
+            conn.execute("""
+                INSERT INTO uploads_cache (id, albums_json, artists_json, last_synced)
+                VALUES (1, ?, ?, ?)
+            """, (
+                json.dumps(albums or [], ensure_ascii=False),
+                json.dumps(artists or [], ensure_ascii=False),
+                time.strftime("%Y-%m-%dT%H:%M:%S"),
+            ))
+            conn.commit()
+            conn.close()
+
+    def get_cached_uploads(self):
+        """Returns (albums, artists) lists from cache, or (None, None)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT albums_json, artists_json FROM uploads_cache WHERE id = 1"
+                ).fetchone()
+                conn.close()
+                if row:
+                    return (
+                        json.loads(row[0]) if row[0] else [],
+                        json.loads(row[1]) if row[1] else [],
+                    )
+            except Exception:
+                conn.close()
+            return None, None
+
 
 class DownloadManager(GObject.Object):
     """Manages song downloads with metadata tagging."""
@@ -360,6 +626,7 @@ class DownloadManager(GObject.Object):
         "item-done": (GObject.SignalFlags.RUN_FIRST, None, (str, bool, str)),  # video_id, success, message
         "item-progress": (GObject.SignalFlags.RUN_FIRST, None, (str, float)),  # video_id, fraction 0.0-1.0
         "item-queued": (GObject.SignalFlags.RUN_FIRST, None, (str,)),  # video_id
+        "download-removed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),  # video_id
     }
 
     def __init__(self, client):
@@ -368,10 +635,37 @@ class DownloadManager(GObject.Object):
         self.db = DownloadDB()
         self._queue = []
         self._lock = threading.Lock()
+        self._migration_lock = threading.Lock()
         self._downloading = False
         self._total = 0
         self._done = 0
         self._pending_playlists = []  # [{id, title, tracks, thumb_url}]
+        self._sweep_stale_tmp_dirs()
+
+    @staticmethod
+    def _sweep_stale_tmp_dirs():
+        """Clean up mkdtemp debris from prior crashes. Skips anything touched
+        within TMP_STALE_SECONDS so a parallel running instance isn't disturbed."""
+        import shutil
+        import tempfile
+        tmp_root = tempfile.gettempdir()
+        now = time.time()
+        try:
+            names = os.listdir(tmp_root)
+        except OSError:
+            return
+        for name in names:
+            if not name.startswith(TMP_PREFIX):
+                continue
+            path = os.path.join(tmp_root, name)
+            try:
+                if not os.path.isdir(path):
+                    continue
+                if now - os.path.getmtime(path) < TMP_STALE_SECONDS:
+                    continue
+            except OSError:
+                continue
+            shutil.rmtree(path, ignore_errors=True)
 
     def is_downloaded(self, video_id):
         return self.db.is_downloaded(video_id)
@@ -545,104 +839,124 @@ class DownloadManager(GObject.Object):
             except Exception:
                 pass
 
-        # File path: ~/Music/YouTube Music/Artist/Title.ext
-        artist_dir = _sanitize_filename(artist_str.split(",")[0].strip())
+        # Destination path honours the user-chosen folder structure.
         song_name = _sanitize_filename(title)
         filename = f"{song_name}.{fmt['ext']}"
-        dir_path = os.path.join(music_dir, artist_dir)
+        dir_path = _build_download_dir(
+            music_dir, artist_str, album, get_folder_structure()
+        )
         file_path = os.path.join(dir_path, filename)
 
-        # Never overwrite
+        # Never overwrite. If the path is taken by a different video
+        # (common in "flat" mode with two same-titled songs), disambiguate
+        # by appending the videoId. If nobody owns it, claim it.
         if os.path.exists(file_path):
-            self.db.add_download(
-                vid, title, artist_str, album, item.get("album_id", ""),
-                track_num, item.get("duration_seconds", 0),
-                file_path, None, thumb_url,
-                os.path.getsize(file_path), fmt_key,
-            )
-            return vid, True, "Already exists", title
+            owner = self.db.get_video_for_path(file_path)
+            if owner and owner != vid:
+                suffixed = f"{song_name} [{vid}].{fmt['ext']}"
+                file_path = os.path.join(dir_path, suffixed)
+                filename = suffixed
+                if os.path.exists(file_path):
+                    # The disambiguated path is also taken → claim as existing.
+                    self.db.add_download(
+                        vid, title, artist_str, album, item.get("album_id", ""),
+                        track_num, item.get("duration_seconds", 0),
+                        file_path, None, thumb_url,
+                        os.path.getsize(file_path), fmt_key,
+                    )
+                    return vid, True, "Already exists", title
+            else:
+                self.db.add_download(
+                    vid, title, artist_str, album, item.get("album_id", ""),
+                    track_num, item.get("duration_seconds", 0),
+                    file_path, None, thumb_url,
+                    os.path.getsize(file_path), fmt_key,
+                )
+                return vid, True, "Already exists", title
 
         os.makedirs(dir_path, exist_ok=True)
 
-        tmp_dir = tempfile.mkdtemp()
-        tmp_file = os.path.join(tmp_dir, f"download.{fmt['ext']}")
+        # Prefix lets _sweep_stale_tmp_dirs() identify crash debris at startup.
+        tmp_dir = tempfile.mkdtemp(prefix=TMP_PREFIX)
+        try:
+            tmp_file = os.path.join(tmp_dir, f"download.{fmt['ext']}")
 
-        def _ydl_progress_hook(d, _vid=vid):
-            if d.get("status") == "downloading":
-                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                downloaded = d.get("downloaded_bytes", 0)
-                if total > 0:
-                    frac = min(downloaded / total, 1.0)
-                    GLib.idle_add(self.emit, "item-progress", _vid, frac)
+            def _ydl_progress_hook(d, _vid=vid):
+                if d.get("status") == "downloading":
+                    total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                    downloaded = d.get("downloaded_bytes", 0)
+                    if total > 0:
+                        frac = min(downloaded / total, 1.0)
+                        GLib.idle_add(self.emit, "item-progress", _vid, frac)
 
-        ydl_opts = {
-            "format": fmt["ydl_format"],
-            "outtmpl": tmp_file.rsplit(".", 1)[0] + ".%(ext)s",
-            "quiet": True,
-            "no_warnings": True,
-            "js_runtimes": {"node": {}},
-            "progress_hooks": [_ydl_progress_hook],
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": fmt_key if fmt_key != "m4a" else "aac",
-                "preferredquality": "0",
-            }],
-        }
-        if self._shared_cookie_file:
-            ydl_opts["cookiefile"] = self._shared_cookie_file
-        if self.client.is_authenticated() and self.client.api:
-            ua = self.client.api.headers.get("User-Agent")
-            if ua:
-                ydl_opts["user_agent"] = ua
+            ydl_opts = {
+                "format": fmt["ydl_format"],
+                "outtmpl": tmp_file.rsplit(".", 1)[0] + ".%(ext)s",
+                "quiet": True,
+                "no_warnings": True,
+                "js_runtimes": {"node": {}},
+                "progress_hooks": [_ydl_progress_hook],
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": fmt_key if fmt_key != "m4a" else "aac",
+                    "preferredquality": "0",
+                }],
+            }
+            if self._shared_cookie_file:
+                ydl_opts["cookiefile"] = self._shared_cookie_file
+            if self.client.is_authenticated() and self.client.api:
+                ua = self.client.api.headers.get("User-Agent")
+                if ua:
+                    ydl_opts["user_agent"] = ua
 
-        url = f"https://music.youtube.com/watch?v={vid}"
-        with YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            url = f"https://music.youtube.com/watch?v={vid}"
+            with YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
 
-        # Find the downloaded file
-        actual_file = None
-        for f in os.listdir(tmp_dir):
-            if f.startswith("download"):
-                actual_file = os.path.join(tmp_dir, f)
-                break
+            # Find the downloaded file
+            actual_file = None
+            for f in os.listdir(tmp_dir):
+                if f.startswith("download"):
+                    actual_file = os.path.join(tmp_dir, f)
+                    break
 
-        if not actual_file or not os.path.exists(actual_file):
-            raise Exception("Download produced no output file")
+            if not actual_file or not os.path.exists(actual_file):
+                raise Exception("Download produced no output file")
 
-        actual_ext = actual_file.rsplit(".", 1)[-1]
-        if actual_ext != fmt["ext"]:
-            filename = f"{song_name}.{actual_ext}"
-            file_path = os.path.join(dir_path, filename)
+            actual_ext = actual_file.rsplit(".", 1)[-1]
+            if actual_ext != fmt["ext"]:
+                filename = f"{song_name}.{actual_ext}"
+                file_path = os.path.join(dir_path, filename)
 
-        # Download cover art for embedding (try fallbacks for video thumbnails)
-        # YouTube returns a tiny 120x90 placeholder JPEG (~1KB) for missing qualities
-        # instead of a real 404, so we check size > 5000 to skip those
-        cover_data = None
-        if thumb_url:
-            from ui.utils import get_ytimg_fallbacks
-            urls_to_try = [thumb_url] + get_ytimg_fallbacks(thumb_url)
-            for try_url in urls_to_try:
-                try:
-                    resp = requests.get(try_url, timeout=15)
-                    if resp.status_code == 200 and len(resp.content) > 5000:
-                        cover_data = resp.content
-                        break
-                except Exception:
-                    continue
+            # Download cover art for embedding (try fallbacks for video thumbnails)
+            # YouTube returns a tiny 120x90 placeholder JPEG (~1KB) for missing qualities
+            # instead of a real 404, so we check size > 5000 to skip those
+            cover_data = None
+            if thumb_url:
+                from ui.utils import get_ytimg_fallbacks
+                urls_to_try = [thumb_url] + get_ytimg_fallbacks(thumb_url)
+                for try_url in urls_to_try:
+                    try:
+                        resp = requests.get(try_url, timeout=15)
+                        if resp.status_code == 200 and len(resp.content) > 5000:
+                            cover_data = resp.content
+                            break
+                    except Exception:
+                        continue
 
-        # Tag metadata
-        self._tag_file(actual_file, actual_ext, title, artist_str, album,
-                       track_num, track_total, vid, item.get("album_id", ""),
-                       cover_data, item.get("duration_seconds", 0),
-                       album_artist=album_artist, release_year=release_year)
+            # Tag metadata
+            self._tag_file(actual_file, actual_ext, title, artist_str, album,
+                           track_num, track_total, vid, item.get("album_id", ""),
+                           cover_data, item.get("duration_seconds", 0),
+                           album_artist=album_artist, release_year=release_year)
 
-        # Move to final location
-        if not os.path.exists(file_path):
-            shutil.move(actual_file, file_path)
-        else:
-            os.remove(actual_file)
-
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+            # Move to final location
+            if not os.path.exists(file_path):
+                shutil.move(actual_file, file_path)
+            else:
+                os.remove(actual_file)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
         # Register in DB
         file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
@@ -655,7 +969,7 @@ class DownloadManager(GObject.Object):
         return vid, True, "Downloaded", title
 
     def _process_queue(self):
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
         # Pre-import yt-dlp on the main thread to avoid concurrent plugin registration
         import yt_dlp  # noqa: F401
 
@@ -666,45 +980,53 @@ class DownloadManager(GObject.Object):
 
         self._shared_cookie_file = self._make_cookie_file()
 
-        # Take all items from queue upfront
-        with self._lock:
-            items = list(self._queue)
-            self._queue.clear()
+        try:
+            # Pump work through the pool so items not yet picked up stay in
+            # self._queue and can still be cancelled. Also means tracks added
+            # mid-batch get processed in the same run.
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                in_flight = {}  # future -> item
+                while True:
+                    with self._lock:
+                        while len(in_flight) < max_workers and self._queue:
+                            item = self._queue.pop(0)
+                            fut = pool.submit(
+                                self._download_one, item, fmt_key, fmt, music_dir
+                            )
+                            in_flight[fut] = item
 
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {}
-            for item in items:
-                fut = pool.submit(self._download_one, item, fmt_key, fmt, music_dir)
-                futures[fut] = item
+                    if not in_flight:
+                        break
 
-            for fut in as_completed(futures):
-                item = futures[fut]
-                vid = item["videoId"]
+                    done_set, _ = wait(in_flight.keys(), return_when=FIRST_COMPLETED)
+                    for fut in done_set:
+                        item = in_flight.pop(fut)
+                        vid = item["videoId"]
+                        try:
+                            vid, success, msg, title = fut.result()
+                            self._done += 1
+                            GLib.idle_add(self.emit, "progress", self._done, self._total, title)
+                            GLib.idle_add(self.emit, "item-done", vid, success, msg)
+                            if success:
+                                self._update_playlists_for(vid)
+                        except Exception as e:
+                            self._done += 1
+                            GLib.idle_add(self.emit, "progress", self._done, self._total, item.get("title", ""))
+                            GLib.idle_add(self.emit, "item-done", vid, False, str(e)[:60])
+                            print(f"[DOWNLOAD] Error downloading {item.get('title')}: {e}")
+        finally:
+            self._downloading = False
+            self._total = 0
+            self._done = 0
+            self._pending_playlists = []
+            # Clean up shared cookie file
+            if self._shared_cookie_file and os.path.exists(self._shared_cookie_file):
                 try:
-                    vid, success, msg, title = fut.result()
-                    self._done += 1
-                    GLib.idle_add(self.emit, "progress", self._done, self._total, title)
-                    GLib.idle_add(self.emit, "item-done", vid, success, msg)
-                    if success:
-                        self._update_playlists_for(vid)
-                except Exception as e:
-                    self._done += 1
-                    GLib.idle_add(self.emit, "progress", self._done, self._total, item.get("title", ""))
-                    GLib.idle_add(self.emit, "item-done", vid, False, str(e)[:60])
-                    print(f"[DOWNLOAD] Error downloading {item.get('title')}: {e}")
-
-        self._downloading = False
-        self._total = 0
-        self._done = 0
-        self._pending_playlists = []
-        # Clean up shared cookie file
-        if self._shared_cookie_file and os.path.exists(self._shared_cookie_file):
-            try:
-                os.remove(self._shared_cookie_file)
-            except OSError:
-                pass
-            self._shared_cookie_file = None
-        GLib.idle_add(self.emit, "complete")
+                    os.remove(self._shared_cookie_file)
+                except OSError:
+                    pass
+                self._shared_cookie_file = None
+            GLib.idle_add(self.emit, "complete")
 
     def _tag_file(self, filepath, ext, title, artist, album, track_num,
                   track_total, video_id, album_id, cover_data_or_path,
@@ -835,64 +1157,330 @@ class DownloadManager(GObject.Object):
             print(f"[DOWNLOAD] Tagging error for {filepath}: {e}")
 
     def register_playlist(self, playlist_id, title, tracks, thumb_url=None):
-        """Register a playlist for incremental m3u8 generation."""
-        self._pending_playlists.append({
-            "id": playlist_id or "",
-            "title": title,
-            "tracks": tracks,
-            "thumb_url": thumb_url,
-        })
-        # Download playlist cover immediately
-        if thumb_url:
-            music_dir = get_music_dir()
-            playlists_dir = os.path.join(music_dir, "playlists")
-            os.makedirs(playlists_dir, exist_ok=True)
-            safe_name = _sanitize_filename(title)
-            cover_path = os.path.join(playlists_dir, f"{safe_name}.jpg")
-            if not os.path.exists(cover_path):
-                try:
-                    from ui.utils import get_high_res_url
-                    url = get_high_res_url(thumb_url) or thumb_url
-                    resp = requests.get(url, timeout=15)
-                    if resp.status_code == 200 and len(resp.content) > 1000:
-                        with open(cover_path, "wb") as f:
-                            f.write(resp.content)
-                except Exception:
-                    pass
+        """Register a playlist for incremental m3u8 generation.
 
-    def _update_playlists_for(self, video_id):
-        """Regenerate m3u8 for any pending playlist containing this video."""
+        If the same playlist is registered again mid-download (user adds
+        more tracks from the same playlist while the first batch is still
+        processing), the new tracks are MERGED into the existing entry
+        rather than replacing it. Replacing would leave the earlier
+        batch's item-done completions looking themselves up in a track
+        list that no longer contains them — the m3u writer would skip
+        them, and those songs would never appear in the m3u.
+
+        Additionally, if a cached copy of the full playlist exists (from
+        an earlier PlaylistPage open), we hydrate the pending track list
+        from it. That way a single-song download still has access to the
+        full playlist order, which the m3u writer needs."""
+        new_tracks = list(tracks or [])
+
+        # Hydrate from cache so the pending playlist reflects the full
+        # track set, not just what the caller happened to pass in.
+        cached_tracks = []
+        if playlist_id:
+            try:
+                cached = self.db.get_cached_playlist(playlist_id)
+                if cached and cached.get("tracks"):
+                    cached_tracks = cached["tracks"]
+            except Exception:
+                pass
+
+        def _union_by_vid(base, extra):
+            seen = {t.get("videoId") for t in base if t.get("videoId")}
+            for t in extra:
+                vid = t.get("videoId")
+                if vid and vid not in seen:
+                    base.append(t)
+                    seen.add(vid)
+                elif not vid:
+                    base.append(t)
+            return base
+
+        merged = False
+        if playlist_id:
+            for existing in self._pending_playlists:
+                if existing.get("id") == playlist_id:
+                    existing["title"] = title or existing.get("title", "")
+                    if thumb_url:
+                        existing["thumb_url"] = thumb_url
+                    _union_by_vid(existing["tracks"], cached_tracks)
+                    _union_by_vid(existing["tracks"], new_tracks)
+                    merged = True
+                    # Swap local reference so the _write_playlist_m3u call
+                    # below sees the fully-merged track list.
+                    tracks = existing["tracks"]
+                    break
+        if not merged:
+            combined = list(cached_tracks) if cached_tracks else []
+            _union_by_vid(combined, new_tracks)
+            self._pending_playlists.append({
+                "id": playlist_id or "",
+                "title": title,
+                "tracks": combined,
+                "thumb_url": thumb_url,
+            })
+            tracks = combined
+        # Refresh the m3u now so re-requesting an already-downloaded
+        # playlist still produces a playable m3u (no item-done signals fire
+        # in that case).
+        self._write_playlist_m3u(title, tracks, playlist_id)
+        # The playlist cover is owned by PlaylistPage — it caches on open
+        # and overwrites on every open. Downloading covers here would
+        # fight that flow (and has produced bugs where a single-song
+        # download wrote the song's thumbnail as the playlist cover).
+
+    def _write_playlist_m3u(self, title, tracks, playlist_id=None):
+        """Write the m3u for a playlist from scratch, in the playlist's
+        default order, including only tracks already downloaded locally.
+
+        No merging with the prior m3u — tracks removed from the source
+        playlist must disappear from the m3u, and reordering must
+        propagate. When `playlist_id` resolves to a cached playlist row
+        we use that ordered list (authoritative); `tracks` is only the
+        fallback when no cache row exists.
+
+        Albums (MPRE*, OLAK*) are skipped — they're not playlists.
+        """
+        if playlist_id and (
+            playlist_id.startswith("MPRE") or playlist_id.startswith("OLAK")
+        ):
+            return
+
+        ordered_tracks = None
+        if playlist_id:
+            try:
+                cached = self.db.get_cached_playlist(playlist_id)
+                if cached and cached.get("tracks"):
+                    ordered_tracks = cached["tracks"]
+            except Exception:
+                pass
+        if not ordered_tracks:
+            ordered_tracks = tracks or []
+
         music_dir = get_music_dir()
         playlists_dir = os.path.join(music_dir, "playlists")
         os.makedirs(playlists_dir, exist_ok=True)
+        safe_name = _sanitize_filename(title)
+        m3u_path = os.path.join(playlists_dir, f"{safe_name}.m3u8")
 
+        entries = []
+        for t in ordered_tracks:
+            vid = t.get("videoId")
+            if not vid:
+                continue
+            local = self.db.get_local_path(vid)
+            if not (local and os.path.exists(local)):
+                continue
+            rel_path = os.path.relpath(local, playlists_dir)
+            dur = t.get("duration_seconds", 0)
+            song_title = t.get("title", "Unknown")
+            artists = t.get("artists", [])
+            artist = ", ".join(
+                a.get("name", "") for a in artists if isinstance(a, dict)
+            ) if artists else ""
+            entries.append((f"#EXTINF:{dur},{artist} - {song_title}", rel_path))
+
+        try:
+            with open(m3u_path, "w", encoding="utf-8") as f:
+                f.write("#EXTM3U\n")
+                f.write(f"#PLAYLIST:{title}\n")
+                for extinf, path in entries:
+                    f.write(f"{extinf}\n")
+                    f.write(f"{path}\n")
+        except Exception as e:
+            print(f"[DOWNLOAD] Error updating playlist {title}: {e}")
+
+    def _update_playlists_for(self, video_id):
+        """Update m3us for any pending playlist that contains this video."""
         for pl in self._pending_playlists:
-            # Check if this video is in the playlist
             if not any(t.get("videoId") == video_id for t in pl.get("tracks", [])):
                 continue
-            safe_name = _sanitize_filename(pl["title"])
-            m3u_path = os.path.join(playlists_dir, f"{safe_name}.m3u8")
+            self._write_playlist_m3u(pl["title"], pl["tracks"], pl.get("id"))
+
+    # ── Cancel / Delete / Migrate ─────────────────────────────────────────
+
+    def cancel_queued(self, video_id):
+        """Remove an item that hasn't started downloading yet. Returns True
+        if something was actually removed. Items already handed to the worker
+        pool can't be cancelled mid-flight — yt_dlp has no cancellation hook.
+        """
+        if not video_id:
+            return False
+        removed = False
+        with self._lock:
+            new_queue = [q for q in self._queue if q["videoId"] != video_id]
+            if len(new_queue) < len(self._queue):
+                self._queue = new_queue
+                # Keep _total >= _done so the progress fraction stays sane.
+                self._total = max(self._total - 1, self._done)
+                removed = True
+        if removed:
+            GLib.idle_add(self.emit, "item-done", video_id, False, "Cancelled")
+            GLib.idle_add(self.emit, "progress", self._done, self._total, "")
+        return removed
+
+    def delete_download(self, video_id):
+        """Remove a completed download from disk, the DB, and any m3u files."""
+        if not video_id:
+            return False
+        file_path = self.db.get_local_path(video_id)
+        if file_path and os.path.exists(file_path):
             try:
+                os.remove(file_path)
+            except OSError as e:
+                print(f"[DOWNLOAD] Failed to remove {file_path}: {e}")
+        if file_path:
+            self._prune_empty_dirs(os.path.dirname(file_path))
+        self.db.remove_download(video_id)
+        self._prune_m3us_missing_files()
+        GLib.idle_add(self.emit, "download-removed", video_id)
+        return True
+
+    def _prune_empty_dirs(self, start_dir):
+        """Delete empty ancestor dirs up to (but not including) the music root."""
+        music_dir = os.path.normpath(get_music_dir())
+        d = os.path.normpath(start_dir) if start_dir else ""
+        while d and os.path.isdir(d) and d != music_dir:
+            try:
+                # commonpath() raises if the paths aren't on the same drive;
+                # treat that as "outside the music root" and stop.
+                if os.path.commonpath([d, music_dir]) != music_dir:
+                    break
+            except ValueError:
+                break
+            try:
+                os.rmdir(d)
+            except OSError:
+                break
+            d = os.path.dirname(d)
+
+    def _prune_m3us_missing_files(self):
+        """Remove entries from all m3u files whose target no longer exists."""
+        playlists_dir = os.path.join(get_music_dir(), "playlists")
+        if not os.path.isdir(playlists_dir):
+            return
+        for name in os.listdir(playlists_dir):
+            if not name.lower().endswith((".m3u", ".m3u8")):
+                continue
+            m3u_path = os.path.join(playlists_dir, name)
+            try:
+                with open(m3u_path, "r", encoding="utf-8") as f:
+                    lines = [ln.rstrip("\n") for ln in f]
+                out = []
+                i = 0
+                while i < len(lines):
+                    line = lines[i]
+                    if line.startswith("#EXTINF:") and i + 1 < len(lines):
+                        rel = lines[i + 1]
+                        abs_path = os.path.normpath(os.path.join(playlists_dir, rel))
+                        if os.path.exists(abs_path):
+                            out.append(line)
+                            out.append(rel)
+                        i += 2
+                    else:
+                        out.append(line)
+                        i += 1
                 with open(m3u_path, "w", encoding="utf-8") as f:
-                    f.write("#EXTM3U\n")
-                    f.write(f"#PLAYLIST:{pl['title']}\n")
-                    for t in pl["tracks"]:
-                        vid = t.get("videoId")
-                        if not vid:
-                            continue
-                        local = self.db.get_local_path(vid)
-                        if local and os.path.exists(local):
-                            rel_path = os.path.relpath(local, playlists_dir)
-                            dur = t.get("duration_seconds", 0)
-                            song_title = t.get("title", "Unknown")
-                            artists = t.get("artists", [])
-                            artist = ", ".join(
-                                a.get("name", "") for a in artists if isinstance(a, dict)
-                            ) if artists else ""
-                            f.write(f"#EXTINF:{dur},{artist} - {song_title}\n")
-                            f.write(f"{rel_path}\n")
+                    for ln in out:
+                        f.write(ln + "\n")
             except Exception as e:
-                print(f"[DOWNLOAD] Error updating playlist {pl['title']}: {e}")
+                print(f"[DOWNLOAD] Error pruning m3u {m3u_path}: {e}")
+
+    def migrate_folder_structure(self):
+        """Reorganize existing downloads to match the current folder_structure
+        pref. Blocks; call from a background thread. Returns (moved, errors).
+        Serialized so overlapping pref toggles don't race each other."""
+        if not self._migration_lock.acquire(blocking=False):
+            return 0, 0
+        try:
+            return self._migrate_folder_structure_locked()
+        finally:
+            self._migration_lock.release()
+
+    def _migrate_folder_structure_locked(self):
+        import shutil
+
+        structure = get_folder_structure()
+        music_dir = get_music_dir()
+        path_map = {}
+        moved = 0
+        errors = 0
+
+        for row in self.db.get_all_downloads():
+            vid = row.get("video_id")
+            old_path = row.get("file_path")
+            if not old_path or not os.path.exists(old_path):
+                continue
+            artist = row.get("artist") or "Unknown Artist"
+            album = row.get("album") or ""
+            new_dir = _build_download_dir(music_dir, artist, album, structure)
+            filename = os.path.basename(old_path)
+            new_path = os.path.join(new_dir, filename)
+
+            if os.path.normpath(new_path) == os.path.normpath(old_path):
+                continue
+
+            # Don't clobber an unrelated file already at the destination.
+            if os.path.exists(new_path):
+                base, ext = os.path.splitext(filename)
+                suffixed = f"{base} [{vid}]{ext}" if vid else filename
+                new_path = os.path.join(new_dir, suffixed)
+                if os.path.exists(new_path):
+                    print(f"[DOWNLOAD] Skipping migration for {old_path}: destination taken")
+                    errors += 1
+                    continue
+
+            try:
+                os.makedirs(new_dir, exist_ok=True)
+                shutil.move(old_path, new_path)
+                self.db.update_file_path(vid, new_path)
+                path_map[os.path.normpath(old_path)] = os.path.normpath(new_path)
+                self._prune_empty_dirs(os.path.dirname(old_path))
+                moved += 1
+            except Exception as e:
+                print(f"[DOWNLOAD] Migration failed for {old_path}: {e}")
+                errors += 1
+
+        if path_map:
+            self._rewrite_m3us_with_map(path_map)
+
+        return moved, errors
+
+    def _rewrite_m3us_with_map(self, path_map):
+        """Update m3u relative paths to point at the new locations."""
+        playlists_dir = os.path.join(get_music_dir(), "playlists")
+        if not os.path.isdir(playlists_dir):
+            return
+        for name in os.listdir(playlists_dir):
+            if not name.lower().endswith((".m3u", ".m3u8")):
+                continue
+            m3u_path = os.path.join(playlists_dir, name)
+            try:
+                with open(m3u_path, "r", encoding="utf-8") as f:
+                    lines = [ln.rstrip("\n") for ln in f]
+                out = []
+                changed = False
+                i = 0
+                while i < len(lines):
+                    line = lines[i]
+                    if line.startswith("#EXTINF:") and i + 1 < len(lines):
+                        out.append(line)
+                        rel = lines[i + 1]
+                        abs_old = os.path.normpath(os.path.join(playlists_dir, rel))
+                        if abs_old in path_map:
+                            out.append(os.path.relpath(path_map[abs_old], playlists_dir))
+                            changed = True
+                        else:
+                            out.append(rel)
+                        i += 2
+                    else:
+                        out.append(line)
+                        i += 1
+                if changed:
+                    with open(m3u_path, "w", encoding="utf-8") as f:
+                        for ln in out:
+                            f.write(ln + "\n")
+            except Exception as e:
+                print(f"[DOWNLOAD] Error rewriting m3u {m3u_path}: {e}")
 
     @staticmethod
     def extract_cover_from_file(filepath):

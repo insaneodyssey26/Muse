@@ -58,13 +58,23 @@ class DiscographyPage(Adw.Bin):
 
         self.content_box.append(self.flow_box)
 
-        # Loading Spinner
+        # Loading Spinner. Wrapped in a vexpanding box whose natural size
+        # is small, so `valign=CENTER` lands the spinner vertically
+        # centered in the viewport when the grid is still empty (initial
+        # load). Once items populate, the grid pushes the spinner down
+        # and load-more renders it at the bottom, same as before.
+        self._loading_wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._loading_wrap.set_vexpand(True)
+        self._loading_wrap.set_valign(Gtk.Align.CENTER)
+        self._loading_wrap.set_halign(Gtk.Align.CENTER)
+        self._loading_wrap.set_margin_top(32)
+        self._loading_wrap.set_margin_bottom(32)
         self.loading_spinner = Adw.Spinner()
         self.loading_spinner.set_halign(Gtk.Align.CENTER)
-        self.loading_spinner.set_margin_top(16)
-        self.loading_spinner.set_margin_bottom(16)
-        self.loading_spinner.set_visible(False)
-        self.content_box.append(self.loading_spinner)
+        self.loading_spinner.set_size_request(48, 48)
+        self._loading_wrap.append(self.loading_spinner)
+        self._loading_wrap.set_visible(False)
+        self.content_box.append(self._loading_wrap)
 
         # Clamp for consistent width
         self.clamp = Adw.Clamp()
@@ -143,7 +153,7 @@ class DiscographyPage(Adw.Bin):
             return
 
         self._is_loading = True
-        self.loading_spinner.set_visible(True)
+        self._loading_wrap.set_visible(True)
 
         def fetch_func():
             try:
@@ -189,7 +199,7 @@ class DiscographyPage(Adw.Bin):
                         self._render_items(filtered_items)
 
                     self._is_loading = False
-                    self.loading_spinner.set_visible(False)
+                    self._loading_wrap.set_visible(False)
 
                     if not new_items:
                         self._has_more = False
@@ -197,7 +207,7 @@ class DiscographyPage(Adw.Bin):
                 GLib.idle_add(update_cb)
             except Exception as e:
                 print(f"Error loading discography: {e}")
-                GLib.idle_add(lambda: self.loading_spinner.set_visible(False))
+                GLib.idle_add(lambda: self._loading_wrap.set_visible(False))
                 self._is_loading = False
 
         threading.Thread(target=fetch_func, daemon=True).start()

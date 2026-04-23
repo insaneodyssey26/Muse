@@ -262,7 +262,17 @@ class PlaylistPage(Adw.Bin):
         spacer = Gtk.Box()
         spacer.set_hexpand(True)
 
+        # Small inline spinner sits just left of the multi-select button
+        # while tracks are loading — less intrusive than a centered 32px
+        # spinner hovering above the list.
+        self.content_spinner = Adw.Spinner()
+        self.content_spinner.set_size_request(18, 18)
+        self.content_spinner.set_valign(Gtk.Align.CENTER)
+        self.content_spinner.set_margin_end(4)
+        self.content_spinner.set_visible(False)
+
         self.sort_row.append(spacer)
+        self.sort_row.append(self.content_spinner)
         self.sort_row.append(self.select_btn)
         self.sort_row.set_visible(False)
         self.header_container.append(self.sort_row)
@@ -329,13 +339,6 @@ class PlaylistPage(Adw.Bin):
         self.empty_label.set_halign(Gtk.Align.CENTER)
         self.empty_label.set_visible(False)
         self.header_container.append(self.empty_label)
-
-        self.content_spinner = Adw.Spinner()
-        self.content_spinner.set_size_request(32, 32)
-        self.content_spinner.set_halign(Gtk.Align.CENTER)
-        self.content_spinner.set_margin_top(24)
-        self.content_spinner.set_visible(False)
-        self.header_container.append(self.content_spinner)
 
         # ── 2. Models ─────────────────────────────────────────────────────────
         self.header_store = Gio.ListStore(item_type=HeaderItem)
@@ -409,7 +412,7 @@ class PlaylistPage(Adw.Bin):
         self.set_child(self.stack)
 
         self.current_tracks = []
-        self.current_limit = 50
+        self.current_limit = 200
         self.is_loading_more = False
         self.current_filter_text = ""
 
@@ -757,12 +760,12 @@ class PlaylistPage(Adw.Bin):
         if not is_online() and not self.player.download_manager.is_downloaded(video_id):
             return
 
-        # Prefer original_tracks when available (covers filtered results beyond lazy-loaded range)
-        tracks_to_queue = (
-            self.original_tracks
-            if hasattr(self, "original_tracks") and self.original_tracks
-            else self._best_queue()
-        )
+        # Use the same queue the big Play button uses so clicking a track
+        # respects the user's chosen sort + direction. Falling back to
+        # `original_tracks` unconditionally would always queue the
+        # playlist's default order, even when the user has sorted by
+        # title / artist / etc.
+        tracks_to_queue = self._best_queue()
         # When offline, filter to only downloaded songs
         if not is_online():
             dm = self.player.download_manager
@@ -778,8 +781,7 @@ class PlaylistPage(Adw.Bin):
 
         print(
             f"\033[95m[DEBUG-CLICK] vid={video_id} found_at={start_index} "
-            f"queue_len={len(tracks_to_queue)} "
-            f"using={'original_tracks' if hasattr(self, 'original_tracks') and self.original_tracks else '_best_queue'}\033[0m"
+            f"queue_len={len(tracks_to_queue)}\033[0m"
         )
 
         if start_index < 0:
@@ -861,6 +863,53 @@ class PlaylistPage(Adw.Bin):
 
     def _clear_track_store(self):
         self.track_store.remove_all()
+        # Bumping the populate token cancels any still-in-flight idle
+        # chunker from a previous render so its scheduled appends get
+        # dropped instead of mutating the freshly-cleared store.
+        self._track_populate_token = getattr(self, "_track_populate_token", 0) + 1
+
+    def _populate_tracks_chunked(self, tracks, first_batch=40, batch=80):
+        """Fill the track store without blocking the main thread.
+
+        Splices the first batch synchronously so the navigation-view
+        transition has something to paint immediately, then pumps the
+        rest on idle AFTER a short delay so the nav animation completes
+        without competing for frame time. A monotonic token invalidates
+        older chunkers so opening a second playlist mid-pump can't
+        corrupt its store.
+
+        Batch size is intentionally small (80 items) — splicing 200+
+        into a Gtk.ListView's filter model in one shot is what causes
+        the perceptible stutter, even on idle.
+
+        Only safe to call from code paths that OWN the track_store's
+        full population (update_ui's non-append branch, reorder_playlist).
+        Do NOT mix with other code that splices in parallel — the tail
+        splices use `track_store.get_n_items()` and will race."""
+        self._clear_track_store()
+        if not tracks:
+            return
+        token = self._track_populate_token
+        head = tracks[:first_batch]
+        self.track_store.splice(0, 0, [TrackItem(t) for t in head])
+        if len(tracks) <= first_batch:
+            return
+
+        def pump(cursor):
+            if token != self._track_populate_token:
+                return False  # superseded
+            end = min(cursor + batch, len(tracks))
+            chunk = [TrackItem(t) for t in tracks[cursor:end]]
+            if chunk:
+                self.track_store.splice(self.track_store.get_n_items(), 0, chunk)
+            if end < len(tracks):
+                GLib.idle_add(pump, end)
+            return False
+
+        # 350ms is long enough for Adw.NavigationView's default page
+        # transition to finish; after that the idle pump can work
+        # without competing with the transition frames.
+        GLib.timeout_add(350, pump, first_batch)
 
     # ── Scroll / lazy load ────────────────────────────────────────────────────
 
@@ -883,6 +932,9 @@ class PlaylistPage(Adw.Bin):
                 self.load_more()
 
     def load_more(self):
+        # Slice more from already-fetched original_tracks whenever possible.
+        # This is safe for any playlist type (regular, album, radio) and
+        # doesn't touch the network.
         if getattr(self, "is_fully_fetched", False) and hasattr(
             self, "original_tracks"
         ):
@@ -906,6 +958,15 @@ class PlaylistPage(Adw.Bin):
                 return
 
         if getattr(self, "is_fully_loaded", False):
+            return
+
+        # Network-fetch path: only for infinite playlists (radio / mixes).
+        # Regular fixed-length playlists reach their end naturally; the
+        # background full-fetch fills original_tracks, and the slice
+        # branch above handles paging from there. Poking the network
+        # for more tracks on a finite playlist produces duplicate
+        # fetches that return the same data and eventually error out.
+        if not self._is_inf():
             return
 
         self.is_loading_more = True
@@ -1151,7 +1212,7 @@ class PlaylistPage(Adw.Bin):
             self.playlist_id = playlist_id
             self._audio_playlist_id = None
             self.playlist_title_text = ""
-            self.current_limit = 50
+            self.current_limit = 200
             self.emit("header-title-changed", "")
             self.current_tracks = []
             self._is_previewing_cover = False
@@ -1186,6 +1247,11 @@ class PlaylistPage(Adw.Bin):
 
             self.stack.set_visible_child_name("content")
             self.content_spinner.set_visible(True)
+
+            # Optimistic render from on-disk cache so the page fills with
+            # content immediately while the fresh fetch runs. The
+            # _fetch_playlist_details thread will re-render with live data.
+            self._populate_from_disk_cache(playlist_id, initial_data)
         else:
             cached_tracks = self.client.get_cached_playlist_tracks(self.playlist_id)
             if cached_tracks is not None:
@@ -1218,6 +1284,187 @@ class PlaylistPage(Adw.Bin):
         )
         thread.daemon = True
         thread.start()
+
+    def _populate_from_disk_cache(self, playlist_id, initial_data):
+        """Render immediately from DownloadDB's playlist cache if we have it.
+        Live data from the API will replace these rows when it arrives.
+        Silently no-ops on any failure — this is an optimization, never a
+        correctness requirement. Rebuilds a header that looks identical to
+        the fully-loaded state (privacy/year/author-with-link)."""
+        try:
+            if (
+                not playlist_id
+                or playlist_id.startswith("UPLOAD")
+                or playlist_id == "DOWNLOADS"
+                or playlist_id == "HISTORY"
+            ):
+                return
+            from player.downloads import get_download_db
+
+            cached = get_download_db().get_cached_playlist(playlist_id)
+            if not cached:
+                return
+            tracks = cached.get("tracks") or []
+            if not tracks:
+                return
+            meta = cached.get("meta") or {}
+            title = (cached.get("title") or (initial_data or {}).get("title") or "")
+
+            author_markup = self._build_author_markup(
+                meta.get("author_raw"), cached.get("author")
+            )
+
+            # Build meta1 (header first line) the same way the live path does.
+            meta1_parts = []
+            if playlist_id.startswith("MPRE") or playlist_id.startswith("OLAK"):
+                # album_type isn't cached per-row but we can infer from size
+                track_count_for_type = len(tracks)
+                if track_count_for_type == 1:
+                    meta1_parts.append("Single")
+                elif 2 <= track_count_for_type <= 6:
+                    meta1_parts.append("EP")
+                else:
+                    meta1_parts.append("Album")
+            else:
+                privacy = (meta.get("privacy") or "").strip()
+                meta1_parts.append(privacy.capitalize() if privacy else "Playlist")
+            year = meta.get("year")
+            if year:
+                meta1_parts.append(str(year))
+            if author_markup:
+                meta1_parts.append(author_markup)
+            meta1 = " • ".join(meta1_parts)
+
+            total_seconds = (
+                meta.get("duration_seconds")
+                or sum(t.get("duration_seconds", 0) for t in tracks)
+            )
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            duration_str = f"{hours} hr {minutes} min" if hours > 0 else f"{minutes} min"
+            song_text = "song" if len(tracks) == 1 else "songs"
+            meta2 = f"{len(tracks)} {song_text} • {duration_str}" if total_seconds else f"{len(tracks)} {song_text}"
+
+            self.original_tracks = list(tracks)
+            self.current_tracks = list(tracks)
+
+            # Prefer the cached playlist cover; if we don't have one,
+            # fall back to whatever `initial_data` carried (usually the
+            # thumb stored on the library grid card). Never reach for the
+            # first track's cover — that was producing wrong header art
+            # for playlists whose actual cover hadn't been cached yet.
+            thumbnails = meta.get("thumbnails") or []
+            if not thumbnails and initial_data and initial_data.get("thumb"):
+                thumbnails = [{"url": initial_data["thumb"]}]
+
+            # Pass track_count=None (not len(tracks)!) so update_ui doesn't
+            # conclude we already have the full list and set
+            # is_fully_fetched=True — that was causing _start_background_full_fetch
+            # to short-circuit on the very next load_playlist call, leaving
+            # the queue permanently capped at whatever the cache happened
+            # to contain (the "still 300" symptom).
+            self.update_ui(
+                title,
+                meta.get("description") or "",
+                meta1,
+                meta2,
+                thumbnails,
+                tracks,
+                False,
+                None,
+                False,
+            )
+            # Force is_fully_fetched back to False: update_ui's tail-check
+            # (`len(current_tracks) == len(original_tracks)`) will otherwise
+            # set it True when we populate both from the cache, which then
+            # makes _start_background_full_fetch short-circuit on the very
+            # next load_playlist call. That was why cached-opens topped out
+            # at whatever the cache happened to hold (e.g. 700/805).
+            self.is_fully_fetched = False
+            # Keep the small spinner visible — we're still fetching fresh data.
+            self.content_spinner.set_visible(True)
+        except Exception as e:
+            print(f"[DISK-CACHE] optimistic render failed: {e}")
+
+    def _build_author_markup(self, author_raw, author_plain):
+        """Reconstruct the `<a href='artist:ID'>Name</a>` markup used by the
+        live load path. Falls back to an escaped plain name if we only have a
+        string, and refuses to propagate old entries that look like a dict
+        repr (from a previous buggy `str(dict)` cache write)."""
+        if isinstance(author_raw, dict):
+            name = author_raw.get("name", "")
+            aid = author_raw.get("id")
+            name_esc = GLib.markup_escape_text(name)
+            return f"<a href='artist:{aid}'>{name_esc}</a>" if aid else name_esc
+        if isinstance(author_raw, list):
+            parts = []
+            for a in author_raw:
+                if not isinstance(a, dict):
+                    continue
+                name = a.get("name", "")
+                aid = a.get("id")
+                name_esc = GLib.markup_escape_text(name)
+                parts.append(
+                    f"<a href='artist:{aid}'>{name_esc}</a>" if aid else name_esc
+                )
+            return ", ".join(parts)
+        # Fallback to the flat cached string.
+        author = (author_plain or "").strip()
+        if author.startswith("{") or author.startswith("["):
+            return ""
+        return GLib.markup_escape_text(author)
+
+    def _save_playlist_cover_async(self, title, url):
+        from ui.utils import save_playlist_cover_async
+        save_playlist_cover_async(self.player, title, url)
+
+    def _invalidate_disk_cache(self):
+        """Drop the cached playlist row so a subsequent smaller fetch (after
+        a user deletion) can actually replace it — cache_playlist refuses
+        to regress otherwise."""
+        pid = self.playlist_id
+        if not pid:
+            return
+        try:
+            from player.downloads import get_download_db
+
+            get_download_db().invalidate_playlist_cache(pid)
+        except Exception as e:
+            print(f"[DISK-CACHE] invalidate failed: {e}")
+        # Also reset in-memory state. update_ui's has_richer guard keeps the
+        # old render if existing_count > new fetch, which would preserve
+        # stale rows after a user deletion.
+        self.original_tracks = []
+        self.current_tracks = []
+        self.is_fully_fetched = False
+        self.is_fully_loaded = False
+
+    def _write_disk_cache(self, playlist_id, title, author, track_count, tracks, meta=None):
+        """Persist freshly-fetched tracks + rich metadata for future
+        optimistic renders. `meta` is a dict with description/year/privacy/
+        author_raw/thumbnails/duration_seconds — see DownloadDB.cache_playlist."""
+        try:
+            if (
+                not playlist_id
+                or playlist_id.startswith("UPLOAD")
+                or playlist_id == "DOWNLOADS"
+                or playlist_id == "HISTORY"
+            ):
+                return
+            if not tracks:
+                return
+            from player.downloads import get_download_db
+
+            get_download_db().cache_playlist(
+                playlist_id,
+                title or "",
+                author or "",
+                int(track_count or len(tracks)),
+                tracks,
+                meta or {},
+            )
+        except Exception as e:
+            print(f"[DISK-CACHE] write failed: {e}")
 
     def _load_playlist_offline(self, playlist_id, initial_data):
         """Load a playlist entirely from local cache when offline."""
@@ -1278,8 +1525,13 @@ class PlaylistPage(Adw.Bin):
 
     def _fetch_playlist_details(self, playlist_id, is_incremental=False):
         try:
-            # Virtual playlists (UPLOADS, DOWNLOADS) are fully loaded already
-            if playlist_id.startswith("UPLOAD") or playlist_id == "DOWNLOADS":
+            # Virtual playlists (UPLOADS, DOWNLOADS, HISTORY) are populated
+            # by LibraryPage and don't need further API fetching here.
+            if (
+                playlist_id.startswith("UPLOAD")
+                or playlist_id == "DOWNLOADS"
+                or playlist_id == "HISTORY"
+            ):
                 self.is_fully_loaded = True
                 self.is_fully_fetched = True
                 return
@@ -1667,6 +1919,10 @@ class PlaylistPage(Adw.Bin):
                 is_owned,
             )
 
+            # Cache writes are owned exclusively by MusicClient (via
+            # get_playlist_full). Keeping it single-source means there's
+            # one place to reason about when the disk cache gets updated.
+
             if (
                 not is_incremental
                 and track_count is not None
@@ -1747,17 +2003,22 @@ class PlaylistPage(Adw.Bin):
             url = thumbnails[-1]["url"]
             if self.cover_img.url != url:
                 self._is_previewing_cover = False
-                # Check for locally saved playlist cover (from download)
+                # Prefer a locally-cached playlist cover regardless of
+                # connectivity — it's instant, and the network thumbnail
+                # would overwrite it anyway if we left it as the initial
+                # source.
                 from player.downloads import get_music_dir, _sanitize_filename
-                from ui.utils import is_online
 
                 cover_path = os.path.join(
                     get_music_dir(), "playlists", f"{_sanitize_filename(title)}.jpg"
                 )
-                if os.path.exists(cover_path) and not is_online():
+                if os.path.exists(cover_path):
                     self.cover_img.load_url(f"file://{cover_path}")
                 else:
                     self.cover_img.load_url(url)
+                # Always refresh the on-disk cover so edits on YT propagate.
+                # The helper itself skips video-thumbnail URLs.
+                self._save_playlist_cover_async(title, url)
         elif not thumbnails and not self.cover_img.url:
             if not self._is_previewing_cover:
                 self.cover_img.set_from_icon_name("media-playlist-audio-symbolic")
@@ -1804,14 +2065,32 @@ class PlaylistPage(Adw.Bin):
                 self.is_fully_fetched = True
                 self.client.set_cached_playlist_tracks(self.playlist_id, tracks)
 
-            self.current_tracks = list(tracks)
-            if not hasattr(self, "original_tracks") or not self.original_tracks:
-                self.original_tracks = list(tracks)
-            self.sort_dropdown.set_selected(0)
+            # If an optimistic render already filled the page from the
+            # disk cache with MORE tracks than this incoming partial
+            # fetch has, don't regress the view. The bg-full-fetch will
+            # refresh original_tracks shortly and scroll-based load_more
+            # will continue to slice from it — same as HEAD behavior,
+            # just with the cache-seeded head already visible.
+            existing_count = len(getattr(self, "original_tracks", None) or [])
+            has_richer = existing_count > len(tracks)
 
-            self._clear_track_store()
-            for t in tracks:
-                self._add_track_row(t)
+            if not has_richer:
+                self.current_tracks = list(tracks)
+                if not hasattr(self, "original_tracks") or not self.original_tracks:
+                    self.original_tracks = list(tracks)
+                self.sort_dropdown.set_selected(0)
+
+                # Chunk the render so the navigation transition animation
+                # survives an 800-track playlist open. Only safe here
+                # because update_ui owns the full store population; bg
+                # complete's default-sort path is a no-op, and reorder
+                # also clears first (which bumps the token).
+                self._populate_tracks_chunked(tracks)
+            else:
+                print(
+                    f"[PLAYLIST] keeping cached render "
+                    f"({existing_count} tracks) over partial fetch ({len(tracks)})"
+                )
 
         if len(self.current_tracks) > 0 and len(self.current_tracks) == len(
             getattr(self, "original_tracks", [])
@@ -1827,8 +2106,12 @@ class PlaylistPage(Adw.Bin):
 
         def fetch_job():
             try:
-                data = self.client.get_playlist(self.playlist_id, limit=5000)
-                tracks = data.get("tracks", [])
+                # get_playlist_full handles the full fetch and (via
+                # MusicClient.get_playlist_full) owns the disk-cache
+                # write once ytmusicapi / raw-continuation / yt_dlp have
+                # done their best. No cache logic here.
+                data = self.client.get_playlist_full(self.playlist_id, limit=None)
+                tracks = data.get("tracks", []) if data else []
                 if tracks:
                     print(f"Background fetch complete. Fetched {len(tracks)} tracks.")
                     self.client.set_cached_playlist_tracks(self.playlist_id, tracks)
@@ -1848,18 +2131,45 @@ class PlaylistPage(Adw.Bin):
         self.is_fully_fetched = True
         self._is_background_fetching = False
 
-        # Re-sort with full data now available
+        # Re-sort with full data now available. Default-sort path doesn't
+        # touch the visible list — load_more will slice from the now-full
+        # original_tracks as the user scrolls, same as HEAD. That is the
+        # "seamless continuation" the user wants back.
         sort_type = self.sort_dropdown.get_selected()
         if sort_type != 0 or getattr(self, "_sort_descending", False):
             self.reorder_playlist(sort_type)
 
-        if getattr(self, "_pending_queue_append", False):
-            print("Background fetch complete, extending player queue.")
-            start_index = len(self.current_tracks)
-            new_tracks = self.original_tracks[start_index:]
-            if new_tracks:
-                self.player.extend_queue(new_tracks)
-            self._pending_queue_append = False
+        # Hide the inline loading spinner now that we have all tracks.
+        if hasattr(self, "content_spinner"):
+            self.content_spinner.set_visible(False)
+
+        # If the playing queue is sourced from this playlist and holds
+        # fewer tracks than we just fetched, extend it. This "completes
+        # the snapshot" the user took when they clicked Play before the
+        # bg fetch finished — without this, pressing skip on the last
+        # queued track of a capped queue (e.g. 300/810) wraps to track
+        # 1 instead of progressing to the real track 301.
+        #
+        # This does NOT reorder or re-sort an already-playing queue,
+        # which would break the "queue is a snapshot" invariant. It
+        # only appends the missing tail.
+        try:
+            source_match = (
+                getattr(self.player, "queue_source_id", None) == self.playlist_id
+            )
+        except Exception:
+            source_match = False
+        if source_match:
+            player_queue_len = len(getattr(self.player, "queue", []) or [])
+            if player_queue_len and player_queue_len < len(self.original_tracks):
+                new_tracks = self.original_tracks[player_queue_len:]
+                if new_tracks:
+                    print(
+                        f"Background fetch complete, extending player queue "
+                        f"({player_queue_len} → {len(self.original_tracks)})."
+                    )
+                    self.player.extend_queue(new_tracks)
+        self._pending_queue_append = False
 
         # Recalculate duration from all tracks now that we have the full data
         self._update_duration_from_all_tracks()
@@ -2093,6 +2403,10 @@ class PlaylistPage(Adw.Bin):
         def thread_func():
             success = self.client.remove_playlist_items(self.playlist_id, to_remove)
             if success:
+                # Invalidate the disk cache — otherwise the shrink is rejected
+                # by cache_playlist's regression guard and the next open would
+                # render the now-stale pre-delete tracks.
+                self._invalidate_disk_cache()
                 GLib.idle_add(self._show_toast, f"Removed {len(to_remove)} tracks")
                 GLib.idle_add(self.load_playlist, self.playlist_id)
             else:
@@ -2230,9 +2544,7 @@ class PlaylistPage(Adw.Bin):
         if self.current_filter_text:
             self.filter_content(self.current_filter_text)
         else:
-            self._clear_track_store()
-            for t in self.current_tracks:
-                self._add_track_row(t)
+            self._populate_tracks_chunked(self.current_tracks)
 
     # ── Right-click ───────────────────────────────────────────────────────────
 
@@ -2413,6 +2725,7 @@ class PlaylistPage(Adw.Bin):
                                 self.client.remove_playlist_items(
                                     self.playlist_id, to_remove
                                 ),
+                                self._invalidate_disk_cache(),
                                 GLib.idle_add(self._show_toast, f"Removed {n} tracks"),
                                 GLib.idle_add(self.load_playlist, self.playlist_id),
                             ),
@@ -2431,6 +2744,7 @@ class PlaylistPage(Adw.Bin):
                             self.client.remove_playlist_items(
                                 self.playlist_id, [{"videoId": v, "setVideoId": sv}]
                             ),
+                            self._invalidate_disk_cache(),
                             GLib.idle_add(self.load_playlist, self.playlist_id),
                         ),
                         daemon=True,
@@ -2478,7 +2792,7 @@ class PlaylistPage(Adw.Bin):
             a_del.connect("activate", _do_delete_upload)
             group.add_action(a_del)
 
-        # Download
+        # Download / Remove Download
         if vid and full_track_data:
             root = self.get_root()
             is_dl = (
@@ -2486,8 +2800,10 @@ class PlaylistPage(Adw.Bin):
                 and hasattr(root, "player")
                 and root.player.download_manager.is_downloaded(vid)
             )
-            if not is_dl:
-                if has_selection:
+            if has_selection:
+                # Selection actions: operate on the selected set. We only offer
+                # a download action here; per-song removal is still one-at-a-time.
+                if not is_dl:
                     action_section.append(
                         f"Download {len(self._selected_video_ids)} Songs",
                         "ctx.download",
@@ -2503,18 +2819,30 @@ class PlaylistPage(Adw.Bin):
                             )
 
                     a_dl.connect("activate", _do_download_sel)
-                else:
-                    action_section.append("Download", "ctx.download")
-                    a_dl = Gio.SimpleAction.new("download", None)
+                    group.add_action(a_dl)
+            elif is_dl:
+                action_section.append("Remove Download", "ctx.remove_download")
+                a_rd = Gio.SimpleAction.new("remove_download", None)
 
-                    def _do_download(act, p, t=full_track_data):
-                        r = self.get_root()
-                        if r and hasattr(r, "download_track"):
-                            r.download_track(
-                                t, self.playlist_title_text, self.playlist_id
-                            )
+                def _do_remove_download(act, p, v=vid):
+                    r = self.get_root()
+                    if r and hasattr(r, "player"):
+                        r.player.download_manager.delete_download(v)
 
-                    a_dl.connect("activate", _do_download)
+                a_rd.connect("activate", _do_remove_download)
+                group.add_action(a_rd)
+            else:
+                action_section.append("Download", "ctx.download")
+                a_dl = Gio.SimpleAction.new("download", None)
+
+                def _do_download(act, p, t=full_track_data):
+                    r = self.get_root()
+                    if r and hasattr(r, "download_track"):
+                        r.download_track(
+                            t, self.playlist_title_text, self.playlist_id
+                        )
+
+                a_dl.connect("activate", _do_download)
                 group.add_action(a_dl)
 
         if action_section.get_n_items() > 0:
@@ -2666,11 +2994,133 @@ class PlaylistPage(Adw.Bin):
         if getattr(self, "_is_background_fetching", False):
             self._pending_queue_append = True
 
+    def refresh_in_place(self):
+        """Reload this page's contents from source without pushing a new
+        NavigationPage. Called by the header-bar refresh button.
+
+        - Real playlists: blow away the disk cache so the regression
+          guard can't preserve stale data, reset state, reload.
+        - DOWNLOADS / HISTORY: re-read from their backing source
+          (local DB / YT history API) and repopulate the same page.
+        """
+        pid = self.playlist_id
+        if not pid:
+            return
+        if pid == "DOWNLOADS":
+            self._clear_track_store()
+            self.original_tracks = []
+            self.current_tracks = []
+            self.stack.set_visible_child_name("loading")
+
+            def _fetch():
+                from player.downloads import get_download_db
+                db = get_download_db()
+                downloads = db.get_all_downloads()
+                tracks = []
+                for d in downloads:
+                    t = {
+                        "videoId": d.get("video_id"),
+                        "title": d.get("title", "Unknown"),
+                        "artists": (
+                            [{"name": d.get("artist", ""), "id": None}]
+                            if d.get("artist") else []
+                        ),
+                        "album": {"name": d.get("album", "")},
+                        "duration_seconds": d.get("duration_seconds", 0),
+                        "thumbnails": (
+                            [{"url": d.get("thumbnail_url")}]
+                            if d.get("thumbnail_url") else []
+                        ),
+                    }
+                    dur = d.get("duration_seconds", 0)
+                    if dur:
+                        t["duration"] = f"{dur // 60}:{dur % 60:02d}"
+                    tracks.append(t)
+                GLib.idle_add(self._reshow_virtual, "Downloaded Songs", tracks,
+                              f"{len(tracks)} songs available offline")
+
+            threading.Thread(target=_fetch, daemon=True).start()
+            return
+        if pid == "HISTORY":
+            from ui.utils import is_online
+            if not is_online():
+                self._show_toast("History requires an internet connection")
+                return
+            self._clear_track_store()
+            self.original_tracks = []
+            self.current_tracks = []
+            self.stack.set_visible_child_name("loading")
+
+            def _fetch():
+                tracks = self.client.get_history() or []
+                for t in tracks:
+                    if t.get("duration_seconds"):
+                        continue
+                    dstr = t.get("duration") or ""
+                    parts = dstr.split(":")
+                    try:
+                        if len(parts) == 2:
+                            t["duration_seconds"] = int(parts[0]) * 60 + int(parts[1])
+                        elif len(parts) == 3:
+                            t["duration_seconds"] = (
+                                int(parts[0]) * 3600
+                                + int(parts[1]) * 60
+                                + int(parts[2])
+                            )
+                    except ValueError:
+                        pass
+                GLib.idle_add(self._reshow_virtual, "Listening History", tracks,
+                              f"{len(tracks)} recent tracks")
+
+            threading.Thread(target=_fetch, daemon=True).start()
+            return
+        # Real playlist.
+        from ui.utils import is_online
+        if not is_online():
+            self._show_toast("Refresh requires an internet connection")
+            return
+        self._invalidate_disk_cache()
+        # Drop the client's in-memory full-playlist cache too. Without
+        # this, load_playlist short-circuits on the cached 805-track
+        # list from a previous open, then update_ui's has_richer guard
+        # keeps that (now-empty-store) "richer" render over the fresh
+        # partial fetch — leaving an empty page.
+        try:
+            self.client._playlist_cache.pop(pid, None)
+        except Exception:
+            pass
+        self._clear_track_store()
+        self.current_limit = 200
+        self.stack.set_visible_child_name("loading")
+        self.content_spinner.set_visible(True)
+        self.load_playlist(pid)
+
+    def _reshow_virtual(self, title, tracks, meta1):
+        self.original_tracks = tracks
+        self.current_tracks = tracks
+        total_seconds = sum(t.get("duration_seconds", 0) or 0 for t in tracks)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        dur = f"{hours} hr {minutes} min" if hours > 0 else f"{minutes} min"
+        self.update_ui(
+            title=title,
+            description="",
+            meta1=meta1,
+            meta2=dur,
+            thumbnails=tracks[0].get("thumbnails", []) if tracks else [],
+            tracks=tracks,
+        )
+
     def _best_queue(self):
+        # Prefer the full track set only when sort is the *forward* default.
+        # Reversed-default or any custom sort relies on `current_tracks`,
+        # which reorder_playlist already populates with the sorted full
+        # list — otherwise Play would quietly use unsorted order.
         if (
             getattr(self, "is_fully_fetched", False)
             and hasattr(self, "original_tracks")
             and self.sort_dropdown.get_selected() == 0
+            and not getattr(self, "_sort_descending", False)
         ):
             return self.original_tracks
         return self.current_tracks
@@ -2713,6 +3163,7 @@ class PlaylistPage(Adw.Bin):
             success = self.client.delete_playlist(self.playlist_id)
             if success:
                 print(f"Playlist {self.playlist_id} deleted successfully.")
+                self._invalidate_disk_cache()
                 # Refresh library through MainWindow
 
                 # Navigate back

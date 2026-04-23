@@ -75,6 +75,20 @@ class StreamCache:
         except OSError as e:
             print(f"[CACHE] Error saving stream URL for {video_id}: {e}")
 
+    def invalidate(self, video_id):
+        """Drop the cache entry for a video — called when a previously
+        cached URL has 503'd mid-play so the next attempt re-resolves
+        via yt-dlp instead of reusing the dead entry."""
+        if not video_id:
+            return
+        path = self._path_for(video_id)
+        try:
+            with self._lock:
+                if os.path.exists(path):
+                    os.remove(path)
+        except OSError:
+            pass
+
     def _evict_old(self):
         """Remove oldest entries if cache exceeds MAX_ENTRIES."""
         try:

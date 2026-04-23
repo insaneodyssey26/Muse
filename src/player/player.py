@@ -114,6 +114,18 @@ class Player(GObject.Object):
         self.duration = -1
         self._is_loading = False
         self._current_logical_state = "stopped"
+        # History sync: record a play to the user's YT account.
+        # `_history_mode` is one of:
+        #   - "immediate" (default, matches YT Music's behavior): record
+        #     as soon as the track starts loading.
+        #   - "after_30s": wait until the user has actually been playing
+        #     it for 30 seconds.
+        #   - "never": don't record.
+        # Keyed by videoId so a single track is only reported once even
+        # if the user seeks around inside it.
+        self._history_recorded_for = None
+        self._history_record_after_sec = 30.0
+        self._history_mode = self._load_history_mode()
 
         # New modes
         self.repeat_mode = "none"  # none, track, all
@@ -248,6 +260,20 @@ class Player(GObject.Object):
         """Sets the queue to the given tracks and starts playback of the first one."""
         self.set_queue(tracks, 0)
 
+    @staticmethod
+    def _normalize_watch_playlist_tracks(tracks):
+        """watch_playlist results use `thumbnail` (singular); the rest of the
+        app expects `thumbnails` and `thumb`. Without this, infinite-radio
+        extensions past the first batch end up with no usable thumbnail url,
+        which makes MPRIS reuse the previous track's cover."""
+        for t in tracks:
+            if "thumbnail" in t and "thumbnails" not in t:
+                t["thumbnails"] = t["thumbnail"]
+            if t.get("thumbnails") and not t.get("thumb"):
+                thumbs = t["thumbnails"]
+                if isinstance(thumbs, list) and thumbs:
+                    t["thumb"] = thumbs[-1].get("url", "")
+
     def start_radio(self, video_id=None, playlist_id=None):
         """Start a radio (mix) from a song or playlist. Runs in background."""
 
@@ -258,15 +284,7 @@ class Player(GObject.Object):
                 )
                 tracks = data.get("tracks", [])
                 if tracks:
-                    # Normalize thumbnail field: watch_playlist uses 'thumbnail' not 'thumbnails'/'thumb'
-                    for t in tracks:
-                        if "thumbnail" in t and "thumbnails" not in t:
-                            t["thumbnails"] = t["thumbnail"]
-                        if t.get("thumbnails") and not t.get("thumb"):
-                            thumbs = t["thumbnails"]
-                            if isinstance(thumbs, list) and thumbs:
-                                t["thumb"] = thumbs[-1].get("url", "")
-
+                    self._normalize_watch_playlist_tracks(tracks)
                     pid = data.get("playlistId")
                     GObject.idle_add(self.set_queue, tracks, 0, False, pid, True)
                 else:
@@ -589,6 +607,21 @@ class Player(GObject.Object):
         self.current_video_id = video_id
         self.duration = -1
         self.emit("progression", 0.0, 0.0)
+        # New track → fresh history-record gate.
+        if self._history_recorded_for != video_id:
+            self._history_recorded_for = None
+        # Immediate mode: record the play now, same as YT Music itself.
+        if (
+            self._history_mode == "immediate"
+            and video_id
+            and self._history_recorded_for != video_id
+        ):
+            self._history_recorded_for = video_id
+            print(f"[HISTORY] immediate record for {video_id}")
+            try:
+                self.client.add_history_item_async(video_id)
+            except Exception as e:
+                print(f"[HISTORY] immediate record failed: {e}")
 
         self.load_generation += 1
         current_gen = self.load_generation
@@ -632,6 +665,11 @@ class Player(GObject.Object):
         self._used_cached_url = False
         self._fallback_stream_url = None
         self._cache_failed_waiting = False
+        # Per-track retry counter. If a URL 503s mid-play we re-resolve
+        # via yt-dlp (up to this many times) — googlevideo CDNs rotate
+        # and a fresh extraction usually picks a healthier host.
+        self._stream_retry_count = 0
+        self._stream_retry_max = 2
         cached_url = self.stream_cache.get(video_id)
         if cached_url:
             print(f"[CACHE] Using cached stream URL for {video_id}")
@@ -749,6 +787,7 @@ class Player(GObject.Object):
                     radio=True,
                 )
                 tracks = data.get("tracks", [])
+                self._normalize_watch_playlist_tracks(tracks)
 
                 # Filter out tracks already in our queue
                 existing_ids = {
@@ -1117,6 +1156,52 @@ class Player(GObject.Object):
                     self.player.set_state(Gst.State.NULL)
                     return
 
+            # Fresh yt-dlp URLs can still 503 because googlevideo rotates
+            # hosts and the format we picked sometimes sits behind a
+            # flaky one. Invalidate the cache entry and re-resolve —
+            # yt-dlp usually lands on a different host the second time.
+            # Capped at `_stream_retry_max` so a genuinely dead video
+            # can't loop forever.
+            vid = self.current_video_id
+            if (
+                vid
+                and self._stream_retry_count < self._stream_retry_max
+                and not self._is_loading
+            ):
+                self._stream_retry_count += 1
+                print(
+                    f"[PLAYER] stream error (attempt "
+                    f"{self._stream_retry_count}/{self._stream_retry_max}), "
+                    f"re-resolving {vid}"
+                )
+                try:
+                    self.stream_cache.invalidate(vid)
+                except Exception:
+                    pass
+                self.player.set_state(Gst.State.NULL)
+                # Kick off a fresh yt-dlp resolution on a background
+                # thread; when it lands, `_fetch_and_play` will call
+                # _start_playback with the new URL.
+                idx = self.current_queue_index
+                if 0 <= idx < len(self.queue):
+                    track = self.queue[idx]
+                    self._is_loading = True
+                    self.load_generation += 1
+                    gen = self.load_generation
+                    threading.Thread(
+                        target=self._fetch_and_play,
+                        args=(
+                            vid,
+                            track.get("title", ""),
+                            track.get("artist", ""),
+                            track.get("thumb"),
+                            track.get("likeStatus", "INDIFFERENT"),
+                            gen,
+                        ),
+                        daemon=True,
+                    ).start()
+                    return
+
             self.player.set_state(Gst.State.NULL)
             self._is_loading = False
             self._update_logical_state()
@@ -1296,7 +1381,52 @@ class Player(GObject.Object):
                 d = self.duration if self.duration > 0 else 0
                 self.emit("progression", float(current_time), float(d))
 
+                # 5. Record a listen after the threshold, but only in
+                # `after_30s` mode. "immediate" is handled in
+                # `_load_internal`; "never" skips recording entirely.
+                vid = getattr(self, "current_video_id", None)
+                if (
+                    self._history_mode == "after_30s"
+                    and vid
+                    and self._history_recorded_for != vid
+                    and state == Gst.State.PLAYING
+                    and current_time >= self._history_record_after_sec
+                ):
+                    self._history_recorded_for = vid
+                    print(
+                        f"[HISTORY] {self._history_record_after_sec}s threshold "
+                        f"hit for {vid} — recording play"
+                    )
+                    try:
+                        self.client.add_history_item_async(vid)
+                    except Exception as e:
+                        print(f"[HISTORY] failed to record {vid}: {e}")
+
         return True
+
+    def _load_history_mode(self):
+        """Read the user's history-recording preference. Defaults to
+        "immediate" so we match YT Music's own behavior out of the box."""
+        import json
+        import os
+        try:
+            path = os.path.join(
+                GLib.get_user_data_dir(), "muse", "prefs.json"
+            )
+            if os.path.exists(path):
+                with open(path) as f:
+                    return json.load(f).get("history_mode", "immediate")
+        except Exception:
+            pass
+        return "immediate"
+
+    def set_history_mode(self, mode):
+        """Update the history-recording mode at runtime so the
+        preferences switch takes effect on the next track without
+        needing a restart."""
+        if mode not in ("immediate", "after_30s", "never"):
+            return
+        self._history_mode = mode
 
     def seek(self, position, flush=True):
         """Seek to position in seconds"""

@@ -24,18 +24,71 @@ def is_online():
     monitor = Gio.NetworkMonitor.get_default()
     return monitor.get_network_available()
 
-# Bounded LRU Cache to prevent memory leaks (max 100 images)
+# Bounded LRU Cache to prevent memory leaks (max 100 images). The cache is
+# read/written by multiple worker threads and the main thread, so every
+# mutation is serialized through IMG_CACHE_LOCK — concurrent check-then-modify
+# sequences were corrupting LRU state and evicting pixbufs that other threads
+# were still wiring up into textures.
 IMG_CACHE = collections.OrderedDict()
 MAX_CACHE_SIZE = 100
+IMG_CACHE_LOCK = threading.Lock()
+
+
+# ── Persistent thumbnail cache on disk ─────────────────────────────────────
+# Avoids the placeholder-icon flash when returning to the library, and makes
+# subsequent launches render covers instantly. Files are raw image bytes
+# under XDG_CACHE/muse/thumbs/<sha1-of-url>.
+def _thumb_cache_dir():
+    path = os.path.join(GLib.get_user_cache_dir(), "muse", "thumbs")
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        pass
+    return path
+
+
+def _thumb_cache_key(url):
+    import hashlib
+    return hashlib.sha1(url.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _thumb_cache_path(url):
+    if not url or url.startswith("file://"):
+        return None
+    return os.path.join(_thumb_cache_dir(), _thumb_cache_key(url))
+
+
+def read_thumb_cache(url):
+    path = _thumb_cache_path(url)
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def write_thumb_cache(url, data):
+    if not url or not data:
+        return
+    path = _thumb_cache_path(url)
+    if not path:
+        return
+    try:
+        # Write to a sibling tmp file then rename so partial writes can never
+        # be read as valid cached bytes.
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def cache_pixbuf(url, pixbuf):
     if not url or not pixbuf:
         return
-    if url in IMG_CACHE:
-        IMG_CACHE.move_to_end(url)
-        return
-
     # Scale down very large images before caching to save massive amounts of RAM
     # 1600px is more than enough for any UI element (including expanded player)
     w = pixbuf.get_width()
@@ -47,9 +100,13 @@ def cache_pixbuf(url, pixbuf):
             int(w * scale), int(h * scale), GdkPixbuf.InterpType.BILINEAR
         )
 
-    IMG_CACHE[url] = pixbuf
-    if len(IMG_CACHE) > MAX_CACHE_SIZE:
-        IMG_CACHE.popitem(last=False)
+    with IMG_CACHE_LOCK:
+        if url in IMG_CACHE:
+            IMG_CACHE.move_to_end(url)
+            return
+        IMG_CACHE[url] = pixbuf
+        if len(IMG_CACHE) > MAX_CACHE_SIZE:
+            IMG_CACHE.popitem(last=False)
 
 
 def get_high_res_url(url, target_size=None):
@@ -119,6 +176,108 @@ def get_ytimg_fallbacks(url):
     for q in _YTIMG_QUALITIES[current_idx + 1 :]:
         fallbacks.append(url.replace(current_q, q))
     return fallbacks
+
+
+# In-flight de-duplication so the library grid doesn't fire N parallel
+# downloads for the same cover on every refresh.
+_COVER_DL_INFLIGHT = set()
+_COVER_DL_LOCK = threading.Lock()
+
+
+def save_playlist_cover_async(player, title, url):
+    """Download a playlist's cover to <music_dir>/playlists/<title>.jpg so
+    future opens (from anywhere — library grid, playlist page) can render
+    it instantly and offline. Silently no-ops on failure.
+
+    Custom-playlist covers (i.ytimg.com/pl_c/...) require YT auth cookies,
+    which a naked `requests.get` doesn't carry. We pass the signed-in
+    client's Cookie header so those URLs resolve.
+
+    Overwrites the existing file so edits on YT propagate.
+    """
+    if not title or not url:
+        return
+    try:
+        from player.downloads import get_music_dir, _sanitize_filename
+
+        cover_dir = os.path.join(get_music_dir(), "playlists")
+        os.makedirs(cover_dir, exist_ok=True)
+        cover_path = os.path.join(cover_dir, f"{_sanitize_filename(title)}.jpg")
+    except Exception:
+        return
+
+    key = (title, url)
+    with _COVER_DL_LOCK:
+        if key in _COVER_DL_INFLIGHT:
+            return
+        _COVER_DL_INFLIGHT.add(key)
+
+    def _dl():
+        try:
+            import requests
+
+            headers = {"User-Agent": "Mozilla/5.0"}
+            try:
+                if player and hasattr(player, "client"):
+                    client = player.client
+                    if (
+                        client
+                        and client.is_authenticated()
+                        and any(
+                            d in url
+                            for d in (
+                                "ytimg.com",
+                                "googleusercontent.com",
+                                "ggpht.com",
+                            )
+                        )
+                    ):
+                        cookie = client.api.headers.get("Cookie")
+                        if cookie:
+                            headers["Cookie"] = cookie
+            except Exception:
+                pass
+            # Try the high-res upgrade first, then walk the ytimg quality
+            # chain down, and finally the original URL — not every video
+            # has a maxresdefault.jpg generated.
+            candidates = []
+            hi = get_high_res_url(url)
+            if hi:
+                candidates.append(hi)
+            candidates.extend(get_ytimg_fallbacks(hi or url))
+            if url not in candidates:
+                candidates.append(url)
+
+            saved = False
+            last_status = None
+            for candidate in candidates:
+                try:
+                    resp = requests.get(candidate, headers=headers, timeout=15)
+                except Exception as e:
+                    print(f"[COVER] {candidate} errored: {e}")
+                    continue
+                last_status = resp.status_code
+                if resp.status_code == 200 and len(resp.content) > 1000:
+                    with open(cover_path, "wb") as f:
+                        f.write(resp.content)
+                    print(
+                        f"[COVER] saved {cover_path} from {candidate} "
+                        f"({len(resp.content)} bytes)"
+                    )
+                    saved = True
+                    break
+            if not saved:
+                print(
+                    f"[COVER] all candidates failed for {title} "
+                    f"(last HTTP {last_status})"
+                )
+        except Exception as e:
+            print(f"[COVER] exception for {title}: {e}")
+        finally:
+            with _COVER_DL_LOCK:
+                _COVER_DL_INFLIGHT.discard(key)
+
+    threading.Thread(target=_dl, daemon=True).start()
 
 
 def copy_to_clipboard(text):
@@ -351,19 +510,25 @@ class AsyncImage(Gtk.Image):
                     else:
                         return
                 else:
-                    headers = {"User-Agent": "Mozilla/5.0"}
-                    if self.player and hasattr(self.player, "client"):
-                        client = self.player.client
-                        if client and client.is_authenticated():
-                            if any(d in url for d in ["youtube.com", "ytimg.com", "googleusercontent.com", "ggpht.com"]):
-                                cookie = client.api.headers.get("Cookie")
-                                if cookie:
-                                    headers["Cookie"] = cookie
+                    # Persistent disk cache first — skips the network hop
+                    # entirely for covers we've already fetched, which makes
+                    # library re-entry flash-free.
+                    data = read_thumb_cache(url)
+                    if not data:
+                        headers = {"User-Agent": "Mozilla/5.0"}
+                        if self.player and hasattr(self.player, "client"):
+                            client = self.player.client
+                            if client and client.is_authenticated():
+                                if any(d in url for d in ["youtube.com", "ytimg.com", "googleusercontent.com", "ggpht.com"]):
+                                    cookie = client.api.headers.get("Cookie")
+                                    if cookie:
+                                        headers["Cookie"] = cookie
 
-                    import requests
-                    resp = requests.get(url, headers=headers, timeout=10)
-                    resp.raise_for_status()
-                    data = resp.content
+                        import requests
+                        resp = requests.get(url, headers=headers, timeout=10)
+                        resp.raise_for_status()
+                        data = resp.content
+                        write_thumb_cache(url, data)
 
                 loader = GdkPixbuf.PixbufLoader()
                 loader.write(data)
@@ -646,20 +811,24 @@ class AsyncPicture(Gtk.Picture):
                 else:
                     return
             else:
-                # Download image data
-                headers = {"User-Agent": "Mozilla/5.0"}
-                if self.player and hasattr(self.player, "client"):
-                    client = self.player.client
-                    if client and client.is_authenticated():
-                        if any(d in url for d in ["youtube.com", "ytimg.com", "googleusercontent.com", "ggpht.com"]):
-                            cookie = client.api.headers.get("Cookie")
-                            if cookie:
-                                headers["Cookie"] = cookie
+                # Persistent disk cache first.
+                data = read_thumb_cache(url)
+                if not data:
+                    # Download image data
+                    headers = {"User-Agent": "Mozilla/5.0"}
+                    if self.player and hasattr(self.player, "client"):
+                        client = self.player.client
+                        if client and client.is_authenticated():
+                            if any(d in url for d in ["youtube.com", "ytimg.com", "googleusercontent.com", "ggpht.com"]):
+                                cookie = client.api.headers.get("Cookie")
+                                if cookie:
+                                    headers["Cookie"] = cookie
 
-                import requests
-                resp = requests.get(url, headers=headers, timeout=10)
-                resp.raise_for_status()
-                data = resp.content
+                    import requests
+                    resp = requests.get(url, headers=headers, timeout=10)
+                    resp.raise_for_status()
+                    data = resp.content
+                    write_thumb_cache(url, data)
 
             loader = GdkPixbuf.PixbufLoader()
             loader.write(data)

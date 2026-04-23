@@ -263,6 +263,11 @@ class MusicClient:
 
             # Initialize API with dict directly
             print(f"Initializing YTMusic with headers: {list(headers.keys())}")
+            # Drop any cached state from a previous session before the
+            # new account's requests start landing — otherwise the
+            # avatar menu, library indexes, and channel-handle map all
+            # keep showing the old user's data.
+            self._clear_account_state()
             self.api = YTMusic(auth=headers)
 
             # Validate
@@ -299,6 +304,156 @@ class MusicClient:
         except Exception as e:
             print(f"Error getting song details: {e}")
             return None
+
+    def get_history(self):
+        """Return the authenticated user's listening history as a list of
+        ytmusicapi track dicts. Empty list if unavailable.
+
+        Writes through to the local cache on success so the next open
+        (or an offline load) can render instantly from disk."""
+        if not self.is_authenticated():
+            if self._offline_db:
+                cached = self._offline_db.get_cached_history()
+                if cached:
+                    return cached
+            return []
+        try:
+            tracks = self.api.get_history() or []
+            if tracks and self._offline_db:
+                try:
+                    self._offline_db.cache_history(tracks)
+                except Exception as e:
+                    print(f"[HISTORY] cache write failed: {e}")
+            return tracks
+        except Exception as e:
+            print(f"Error getting history: {e}")
+            if self._offline_db:
+                cached = self._offline_db.get_cached_history()
+                if cached:
+                    return cached
+            return []
+
+    def get_cached_history(self):
+        """Pull the cached history directly, bypassing the network. Used
+        for the optimistic first paint of HistoryPage."""
+        if self._offline_db:
+            return self._offline_db.get_cached_history() or []
+        return []
+
+    def invalidate_history_cache_entry(self, video_id):
+        """Remove a single track from the cached history list — used
+        after an optimistic 'Remove from History' so the disk cache
+        stays in sync with the server-side removal."""
+        if self._offline_db and video_id:
+            try:
+                self._offline_db.remove_from_history_cache(video_id)
+            except Exception as e:
+                print(f"[HISTORY] cache invalidate failed: {e}")
+
+    def add_history_item_async(self, video_id):
+        """Fire-and-forget record of a listen to the signed-in YT Music
+        account. Requires the song's `get_song` response — ytmusicapi's
+        add_history_item uses the `videostatsPlaybackUrl` inside it to
+        ping YT's playback tracker.
+
+        Also optimistically prepends the track to the on-disk history
+        cache so HistoryPage reflects the play before YT's server-side
+        roll-up catches up."""
+        if not video_id:
+            print(f"[HISTORY] skip: no video id")
+            return
+        if not self.is_authenticated():
+            print(f"[HISTORY] skip: not authenticated ({video_id})")
+            return
+        import threading
+
+        def _record():
+            try:
+                song = self.api.get_song(video_id)
+                if not song:
+                    print(f"[HISTORY] get_song returned None for {video_id}")
+                    return
+                pb = song.get("playbackTracking") or {}
+                if not pb.get("videostatsPlaybackUrl"):
+                    print(
+                        f"[HISTORY] {video_id} has no playbackTracking URL — "
+                        f"can't add to history"
+                    )
+                    return
+                resp = self.api.add_history_item(song)
+                status = getattr(resp, "status_code", "?")
+                print(
+                    f"[HISTORY] add_history_item({video_id}) -> HTTP {status}"
+                )
+                # Server-side histories take a moment to include the new
+                # entry. Prepend locally so the Verlauf-style UI reacts
+                # immediately on the next open.
+                try:
+                    self._prepend_to_history_cache(video_id, song)
+                except Exception as e:
+                    print(f"[HISTORY] cache prepend failed: {e}")
+            except Exception as e:
+                print(f"[HISTORY] add_history_item failed for {video_id}: {e}")
+
+        threading.Thread(target=_record, daemon=True).start()
+
+    def _prepend_to_history_cache(self, video_id, song_data):
+        """Patch the cached history with an optimistic 'Today' entry for
+        the just-played track. Drops any existing entry for the same
+        videoId so the track bubbles to the top instead of duplicating."""
+        if not self._offline_db:
+            return
+        cached = self._offline_db.get_cached_history() or []
+
+        # Build a minimal track dict from the get_song response. The
+        # shape mirrors what `get_history` returns so HistoryPage can
+        # render it without special-casing.
+        video_details = song_data.get("videoDetails") or {}
+        title = video_details.get("title", "")
+        author = video_details.get("author", "")
+        length_seconds = 0
+        try:
+            length_seconds = int(video_details.get("lengthSeconds", 0))
+        except (TypeError, ValueError):
+            length_seconds = 0
+        thumbs = (
+            video_details.get("thumbnail", {}).get("thumbnails", []) or []
+        )
+
+        new_entry = {
+            "videoId": video_id,
+            "title": title,
+            "artists": [{"name": author, "id": video_details.get("channelId")}]
+            if author else [],
+            "album": {"name": "", "id": None},
+            "duration": (
+                f"{length_seconds // 60}:{length_seconds % 60:02d}"
+                if length_seconds else ""
+            ),
+            "duration_seconds": length_seconds,
+            "thumbnails": thumbs,
+            "played": "Today",
+            "likeStatus": "INDIFFERENT",
+        }
+
+        filtered = [t for t in cached if t.get("videoId") != video_id]
+        filtered.insert(0, new_entry)
+        try:
+            self._offline_db.cache_history(filtered)
+        except Exception as e:
+            print(f"[HISTORY] cache_history write failed: {e}")
+
+    def remove_history_items(self, feedback_tokens):
+        """Remove history entries by their feedback tokens (each history
+        item exposes one). Returns True on success."""
+        if not self.is_authenticated() or not feedback_tokens:
+            return False
+        try:
+            self.api.remove_history_items(feedback_tokens)
+            return True
+        except Exception as e:
+            print(f"[HISTORY] remove failed: {e}")
+            return False
 
     def get_library_playlists(self):
         if not self.is_authenticated():
@@ -538,6 +693,37 @@ class MusicClient:
             print(f"Error fetching account info: {e}")
             return None
 
+    def resolve_channel_handle(self, handle):
+        """Turn a YT Music @handle into an artist browseId (UC…) via
+        the internal `navigation/resolve_url` endpoint. Returns the
+        browseId string, or None. Results are cached on the client
+        instance to avoid repeated lookups."""
+        if not handle or not self.api:
+            return None
+        if not hasattr(self, "_channel_handle_cache"):
+            self._channel_handle_cache = {}
+        if handle in self._channel_handle_cache:
+            return self._channel_handle_cache[handle]
+
+        h = handle.lstrip("@")
+        try:
+            resp = self.api._send_request(
+                "navigation/resolve_url",
+                {"url": f"https://music.youtube.com/@{h}"},
+            )
+            # The response's `endpoint.browseEndpoint.browseId` is the
+            # channel id; dig defensively, the key nesting has shifted
+            # between YT internal revisions.
+            ep = (resp or {}).get("endpoint") or {}
+            browse = ep.get("browseEndpoint") or ep.get("browse") or {}
+            bid = browse.get("browseId")
+            if bid:
+                self._channel_handle_cache[handle] = bid
+                return bid
+        except Exception as e:
+            print(f"[CLIENT] resolve_channel_handle({handle}) failed: {e}")
+        return None
+
     def is_own_playlist(self, playlist_metadata, playlist_id=None):
         """
         Determines if a playlist is owned/editable by the current user.
@@ -601,12 +787,37 @@ class MusicClient:
             result = self.api.get_playlist(playlist_id, limit=limit)
             # Cache the full result for offline use
             if result and self._offline_db:
+                raw_author = result.get("author", "")
+                # ytmusicapi returns author as a dict {"name": ..., "id": ...}
+                # for some playlists; str()-ing it produces "{'name': ...}"
+                # which later gets dumped into the UI as literal JSON-looking
+                # text. Normalize to the display name only.
+                if isinstance(raw_author, dict):
+                    author_str = raw_author.get("name", "")
+                elif isinstance(raw_author, list):
+                    author_str = ", ".join(
+                        a.get("name", "") for a in raw_author if isinstance(a, dict)
+                    )
+                else:
+                    author_str = str(raw_author or "")
+                # Store the rich metadata so PlaylistPage can re-render the
+                # full header (year, privacy, author-as-link, etc.) on the
+                # next open before the live fetch completes.
+                meta = {
+                    "description": result.get("description", "") or "",
+                    "year": result.get("year", "") or "",
+                    "privacy": result.get("privacy", "") or "",
+                    "duration_seconds": result.get("duration_seconds"),
+                    "thumbnails": result.get("thumbnails", []) or [],
+                    "author_raw": raw_author if isinstance(raw_author, (dict, list)) else None,
+                }
                 self._offline_db.cache_playlist(
                     playlist_id,
                     result.get("title", ""),
-                    str(result.get("author", "")),
+                    author_str,
                     result.get("trackCount", len(result.get("tracks", []))),
                     result.get("tracks", []),
+                    meta,
                 )
             return result
         except Exception as e:
@@ -763,6 +974,156 @@ class MusicClient:
             pass
         return []
 
+    def get_playlist_full(self, playlist_id, limit=None):
+        """Fetch a playlist's full track list. Uses ytmusicapi first, then
+        our raw-continuation fallback, then yt_dlp's flat-playlist
+        extraction as a last resort.
+
+        ytmusicapi's internal paginator sometimes stops before hitting
+        trackCount on large playlists (drops a continuation token mid-
+        stream). The raw-continuation fallback hits the same pagination
+        API though, so it often caps at the same point. yt_dlp uses a
+        different underlying request flow that reliably walks YT's full
+        playlist enumeration — the metadata it returns is lighter than
+        ytmusicapi's, so we use it to fill IN the gaps (matching by
+        videoId) rather than replacing what we have."""
+        data = self.get_playlist(playlist_id, limit=limit) or {}
+        tracks = list(data.get("tracks") or [])
+        track_count = data.get("trackCount")
+        print(
+            f"[PLAYLIST] get_playlist_full: ytmusicapi returned "
+            f"{len(tracks)}/{track_count} tracks for {playlist_id}"
+        )
+        # 5-song tolerance for off-by-one counting in the API's trackCount.
+        if track_count and len(tracks) < track_count - 5:
+            # Stage 1: raw-continuation on the VL<id> browse endpoint.
+            try:
+                browse_id = playlist_id if playlist_id.startswith("VL") else f"VL{playlist_id}"
+                raw_items = self._raw_parse_playlist(browse_id) or []
+                seen = {t.get("videoId") for t in tracks if t.get("videoId")}
+                added = 0
+                for item in raw_items:
+                    vid = item.get("videoId")
+                    if vid and vid not in seen:
+                        tracks.append(item)
+                        seen.add(vid)
+                        added += 1
+                print(
+                    f"[PLAYLIST] raw-continuation added {added} tracks "
+                    f"(total now {len(tracks)})"
+                )
+                data["tracks"] = tracks
+            except Exception as e:
+                print(f"[PLAYLIST] raw-continuation fallback failed: {e}")
+
+        # Stage 2: if we're STILL short, use yt_dlp to enumerate all
+        # videoIds on the playlist and fill in whatever we don't have
+        # yet with minimal stubs. These will lack rich metadata but will
+        # at least be queueable — the player fetches per-track details
+        # on demand.
+        if track_count and len(tracks) < track_count - 5:
+            ytdlp_items = self._yt_dlp_flat_playlist(playlist_id)
+            if ytdlp_items:
+                seen = {t.get("videoId") for t in tracks if t.get("videoId")}
+                added = 0
+                for item in ytdlp_items:
+                    vid = item.get("videoId")
+                    if vid and vid not in seen:
+                        tracks.append(item)
+                        seen.add(vid)
+                        added += 1
+                print(
+                    f"[PLAYLIST] yt_dlp added {added} tracks "
+                    f"(total now {len(tracks)})"
+                )
+                data["tracks"] = tracks
+
+        # Persist the (possibly-augmented) track list. The regression
+        # guard in cache_playlist() prevents overwriting a richer cache
+        # with a poorer one, so this is safe to call unconditionally.
+        if self._offline_db and tracks:
+            try:
+                raw_author = data.get("author")
+                if isinstance(raw_author, dict):
+                    author_str = raw_author.get("name", "")
+                elif isinstance(raw_author, list):
+                    author_str = ", ".join(
+                        a.get("name", "") for a in raw_author if isinstance(a, dict)
+                    )
+                else:
+                    author_str = str(raw_author or "")
+                meta = {
+                    "description": data.get("description", "") or "",
+                    "year": data.get("year", "") or "",
+                    "privacy": data.get("privacy", "") or "",
+                    "duration_seconds": data.get("duration_seconds"),
+                    "thumbnails": data.get("thumbnails", []) or [],
+                    "author_raw": raw_author,
+                }
+                self._offline_db.cache_playlist(
+                    playlist_id,
+                    data.get("title", ""),
+                    author_str,
+                    track_count or len(tracks),
+                    tracks,
+                    meta,
+                )
+            except Exception as e:
+                print(f"[PLAYLIST] re-cache after augment failed: {e}")
+        return data
+
+    def _yt_dlp_flat_playlist(self, playlist_id):
+        """Use yt_dlp's flat-playlist extraction to enumerate every
+        videoId on a YouTube playlist. Returns minimal track dicts
+        compatible with the rest of the app (videoId, title, duration,
+        thumbnails, artists). Returns [] on any failure."""
+        try:
+            from yt_dlp import YoutubeDL
+        except ImportError:
+            return []
+
+        url = f"https://music.youtube.com/playlist?list={playlist_id}"
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": "in_playlist",
+            "skip_download": True,
+            "ignoreerrors": True,
+        }
+        try:
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            print(f"[PLAYLIST] yt_dlp flat-playlist raised: {e}")
+            return []
+        if not info:
+            return []
+        result = []
+        for entry in info.get("entries") or []:
+            if not entry:
+                continue
+            vid = entry.get("id")
+            if not vid:
+                continue
+            duration = entry.get("duration")
+            thumbs = []
+            for t in entry.get("thumbnails") or []:
+                u = t.get("url") if isinstance(t, dict) else None
+                if u:
+                    thumbs.append({"url": u})
+            artists = []
+            uploader = entry.get("uploader") or entry.get("channel")
+            if uploader:
+                artists.append({"name": uploader})
+            result.append({
+                "videoId": vid,
+                "title": entry.get("title", "") or "Unknown",
+                "duration_seconds": int(duration) if duration else 0,
+                "thumbnails": thumbs,
+                "artists": artists,
+            })
+        return result
+
     def _raw_parse_playlist(self, browse_id):
         """Parse a playlist from raw API when ytmusicapi can't handle it (e.g. chart playlists)."""
         body = {"browseId": browse_id}
@@ -861,7 +1222,7 @@ class MusicClient:
                             items.extend(self._fetch_continuation(token))
         return items
 
-    def _fetch_continuation(self, token, max_pages=20):
+    def _fetch_continuation(self, token, max_pages=100):
         """Follow continuation tokens to get all paginated results."""
         items = []
         for _ in range(max_pages):
@@ -1324,8 +1685,47 @@ class MusicClient:
 
         self.api = YTMusic()
         self._is_authed = False
+        self._clear_account_state()
         print("Logged out. API reset to unauthenticated mode.")
         return True
+
+    def _clear_account_state(self):
+        """Drop every per-account cache so account switches can't leak
+        data from the previous user. Covers in-memory state (account
+        info, library indexes, subscribed artists, playlist/channel
+        caches) and the per-user on-disk caches (history + library
+        playlists)."""
+        self._user_info = None
+        self._subscribed_artists = set()
+        self._library_playlists = []
+        self._library_playlist_ids = set()
+        self._library_album_ids = set()
+        self._playlist_cache = {}
+        if hasattr(self, "_channel_handle_cache"):
+            self._channel_handle_cache = {}
+
+        # Wipe the on-disk per-user caches via DownloadDB helpers if
+        # they're available. Silent on failure — this is a cleanup
+        # pass, not a correctness-critical operation.
+        db = self._offline_db
+        if db is None:
+            return
+        try:
+            import sqlite3
+            with db._lock:
+                conn = db._connect()
+                try:
+                    conn.execute("DELETE FROM history_cache")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    conn.execute("DELETE FROM library_playlists_cache")
+                except sqlite3.OperationalError:
+                    pass
+                conn.commit()
+                conn.close()
+        except Exception as e:
+            print(f"[CLIENT] per-account cache wipe failed: {e}")
 
     def edit_playlist(
         self, playlist_id, title=None, description=None, privacy=None, moveItem=None

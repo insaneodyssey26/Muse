@@ -27,6 +27,8 @@ class SearchPage(Adw.Bin):
         results_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
         results_clamp = Adw.Clamp()
+        results_clamp.set_maximum_size(1024)
+        results_clamp.set_tightening_threshold(600)
 
         self.results_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
         self.results_box.set_margin_top(24)
@@ -61,6 +63,8 @@ class SearchPage(Adw.Bin):
 
         # Clamp for Explore
         explore_clamp = Adw.Clamp()
+        explore_clamp.set_maximum_size(1024)
+        explore_clamp.set_tightening_threshold(600)
 
         self.explore_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
         self.explore_box.set_margin_top(24)
@@ -107,8 +111,12 @@ class SearchPage(Adw.Bin):
             self.results_box.set_spacing(24)
             self.explore_box.set_spacing(24)
 
-        # Update song row images
+        # Update song row images on both the search-results pane and the
+        # explore pane. Previously only results_box was walked, so the
+        # trending/top-song rows on Explore kept their 56px thumbnails
+        # in compact mode.
         self._propagate_compact(self.results_box, compact)
+        self._propagate_compact(self.explore_box, compact)
 
         # Only fetch if explore hasn't loaded yet; otherwise just keep
         # the existing content (spacing was updated above).
@@ -458,6 +466,8 @@ class SearchPage(Adw.Bin):
             card.add_css_class("artist-horizontal-item")
             card.item_data = item
 
+            # Matches the 160px cover size used by library/search grids so
+            # the Charts row doesn't tower over everything else on Explore.
             img = AsyncImage(url=thumb_url, size=160, player=self.player)
             wrapper = Gtk.Box()
             wrapper.set_overflow(Gtk.Overflow.HIDDEN)

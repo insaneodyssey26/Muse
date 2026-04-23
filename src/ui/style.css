@@ -9,6 +9,27 @@
   border-radius: 12px;
 }
 
+/* Account avatar in the header bar / popover. The .avatar class is on
+   a Gtk.Box wrapper that has overflow:hidden; we only need to round
+   the corners here. */
+.avatar {
+  border-radius: 9999px;
+  min-width: 0;
+  min-height: 0;
+}
+
+
+/* Popover items in the avatar / account menu: flat buttons with
+   non-bold labels so they read like menu entries rather than
+   call-to-action buttons. */
+.avatar-menu-row {
+  padding: 6px 8px;
+}
+
+.avatar-menu-row label {
+  font-weight: normal;
+}
+
 .banner-top-rounded {
   border-radius: 12px 12px 0 0;
 }
@@ -223,10 +244,13 @@ listview.playlist-view > row:disabled {
   margin-bottom: 24px;
 }
 
-/* Sidebar (Nautilus-like) */
+/* Sidebar (Nautilus-like). GTK's OverlaySplitView draws its own separator
+   between panes, so we explicitly clear the border Adwaita's default
+   `.sidebar` styling adds (which was designed for left-docked sidebars). */
 .sidebar {
   background-color: @window_bg_color;
-  border-right: 1px solid @borders;
+  border-left: none;
+  border-right: none;
 }
 
 /* Ensure queue panel within sidebar fits well */
