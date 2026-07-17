@@ -2140,12 +2140,15 @@ class PlaylistPage(Adw.Bin):
                     thumbnails = data.get("thumbnails", [])
 
                     track_count = data.get("trackCount")
-                    if track_count is None:
+                    if track_count is None and self._is_inf():
                         song_text = "Infinite"
                         count_str = "Infinite"
                     else:
-                        # track_counts from "trackCount" key can sometimes overcount; a bug from YouTube Music itself
-                        # so use length of tracks array
+                        # trackCount can be absent on a partial/degraded fetch
+                        # (title present, no count) for an ordinary finite
+                        # playlist, falling back to "Infinite" there is wrong.
+                        # It can also overcount (a YouTube Music bug), so we
+                        # display the actual number of tracks we loaded.
                         song_text = "song" if len(tracks) == 1 else "songs"
                         count_str = f"{len(tracks)} {song_text}"
 
@@ -2249,7 +2252,7 @@ class PlaylistPage(Adw.Bin):
             if count_str:
                 meta2_parts.append(count_str)
             else:
-                if "track_count" in locals() and track_count is None:
+                if "track_count" in locals() and track_count is None and self._is_inf():
                     meta2_parts.append("Infinite")
                 else:
                     # track_counts from "trackCount" key can sometimes overcount; a bug from YouTube Music itself
@@ -2314,6 +2317,16 @@ class PlaylistPage(Adw.Bin):
         self.playlist_description_text = description
         self.playlist_name_label.set_label(title)
 
+        # A partial live fetch (initial limit=200 → ~300 tracks) must not
+        # regress a richer view we already rendered from the disk cache. The
+        # branch below keeps the visible track list; we apply the SAME guard
+        # to the header count/duration label here, otherwise the count
+        # visibly flashes 895 → 300 → 895 as the partial fetch lands ahead of
+        # the background full-fetch (which refreshes original_tracks and the
+        # label a moment later). Only guards non-append (full) renders.
+        existing_count = len(getattr(self, "original_tracks", None) or [])
+        keep_richer = (not append) and existing_count > len(tracks or [])
+
         if description and description.strip():
             self._full_description = description
             self._description_expanded = False
@@ -2330,7 +2343,8 @@ class PlaylistPage(Adw.Bin):
             self.desc_box.set_visible(False)
 
         self.meta_label.set_markup(meta1)
-        self.stats_label.set_label(meta2)
+        if not keep_richer:
+            self.stats_label.set_label(meta2)
 
         is_album = self.playlist_id and (
             self.playlist_id.startswith("MPRE")
@@ -2425,11 +2439,9 @@ class PlaylistPage(Adw.Bin):
             # fetch has, don't regress the view. The bg-full-fetch will
             # refresh original_tracks shortly and scroll-based load_more
             # will continue to slice from it — same as HEAD behavior,
-            # just with the cache-seeded head already visible.
-            existing_count = len(getattr(self, "original_tracks", None) or [])
-            has_richer = existing_count > len(tracks)
-
-            if not has_richer:
+            # just with the cache-seeded head already visible. Same guard
+            # as the header-count one above (keep_richer).
+            if not keep_richer:
                 self.current_tracks = list(tracks)
                 if not hasattr(self, "original_tracks") or not self.original_tracks:
                     self.original_tracks = list(tracks)

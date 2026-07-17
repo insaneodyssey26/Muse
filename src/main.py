@@ -42,6 +42,18 @@ if sys.platform.startswith("linux") and "MALLOC_ARENA_MAX" not in os.environ:
             # is still set for threads spawned later, which helps partially.
             print(f"[MALLOC] arena re-exec skipped: {_e}")
 
+# Raise the open-file (FD) soft limit to maybe resolve the issue when things eventually stop loading
+if not sys.platform.startswith("win"):
+    try:
+        import resource
+        _soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        _target = min(_hard, 65536) if _hard != resource.RLIM_INFINITY else 65536
+        if _soft < _target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (_target, _hard))
+            print(f"[FD] raised open-file soft limit {_soft} -> {_target}")
+    except Exception as _e:
+        print(f"[FD] could not raise open-file limit: {_e}")
+
 # On Windows, set AppUserModelID so the taskbar shows our icon, not Python's
 if sys.platform == "win32":
     try:
