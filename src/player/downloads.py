@@ -39,11 +39,50 @@ TMP_STALE_SECONDS = 3600  # only sweep dirs untouched for an hour — avoids
                           # clobbering a parallel running instance's work.
 
 
+# fixes file name length issues
+_NAME_MAX_BYTES = 255
+_FILENAME_BYTE_BUDGET = 200
+
+
+def _truncate_filename_bytes(name, max_bytes=_FILENAME_BYTE_BUDGET):
+    """Trim `name` so its UTF-8 encoding fits in `max_bytes`, without splitting
+    a multi-byte character. Decoding with errors="ignore" drops any partial
+    trailing sequence left by the byte-wise cut."""
+    encoded = name.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return name
+    return encoded[:max_bytes].decode("utf-8", "ignore")
+
+
+def _fs_name_max(dir_path, default=_NAME_MAX_BYTES):
+    """Return the max filename length in bytes the filesystem holding `dir_path`
+    allows. ext4/APFS report 255; eCryptfs (encrypted home) reports ~143; some
+    network/FAT mounts report less. `dir_path` may not exist yet, so probe the
+    nearest existing ancestor. Falls back to `default` where pathconf is
+    unavailable (e.g. Windows)."""
+    probe = dir_path
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    try:
+        val = os.pathconf(probe, "PC_NAME_MAX")
+        if val and val > 0:
+            return val
+    except (OSError, ValueError, AttributeError):
+        pass
+    return default
+
+
 def _sanitize_filename(name):
-    """Remove characters that are invalid in filenames."""
+    """Remove characters that are invalid in filenames and cap the length so
+    the result stays within the filesystem's per-component byte limit."""
     if not name:
         return "Unknown"
     name = re.sub(r'[<>:"/\\|?*]', "", name)
+    name = name.strip(". ")
+    name = _truncate_filename_bytes(name)
     name = name.strip(". ")
     return name or "Unknown"
 
@@ -117,11 +156,17 @@ def _build_download_dir(music_dir, artist_str, album, structure):
     if structure == "flat":
         return base_dir
 
-    artist_dir = _sanitize_filename(artist_str.split(",")[0].strip())
+    # Fit each directory component to what the destination filesystem allows so
+    # an overlong artist/album name can't blow up makedirs() with ENAMETOOLONG.
+    name_max = _fs_name_max(base_dir)
+    artist_dir = _truncate_filename_bytes(
+        _sanitize_filename(artist_str.split(",")[0].strip()), name_max
+    )
     artist_path = os.path.join(base_dir, artist_dir)
 
     if structure == "artist_album" and album:
-        return os.path.join(artist_path, _sanitize_filename(album))
+        album_dir = _truncate_filename_bytes(_sanitize_filename(album), name_max)
+        return os.path.join(artist_path, album_dir)
 
     return artist_path
 
@@ -1060,11 +1105,16 @@ class DownloadManager(GObject.Object):
                 pass
 
         # Destination path honours the user-chosen folder structure.
-        song_name = _sanitize_filename(title)
-        filename = f"{song_name}.{fmt['ext']}"
         dir_path = _build_download_dir(
             music_dir, artist_str, album, get_folder_structure()
         )
+        # Fit the title to the destination filesystem's real per-name byte limit
+        # (255 on ext4, ~143 on eCryptfs, less on some mounts), leaving headroom
+        # for the extension and a possible " [videoId]" disambiguation suffix.
+        suffix_reserve = len(str(vid)) + len(fmt["ext"]) + 8
+        name_budget = max(1, _fs_name_max(dir_path) - suffix_reserve)
+        song_name = _truncate_filename_bytes(_sanitize_filename(title), name_budget)
+        filename = f"{song_name}.{fmt['ext']}"
         file_path = os.path.join(dir_path, filename)
 
         # Never overwrite. If the path is taken by a different video
@@ -1479,7 +1529,9 @@ class DownloadManager(GObject.Object):
         music_dir = get_music_dir()
         playlists_dir = os.path.join(music_dir, "Playlists")
         os.makedirs(playlists_dir, exist_ok=True)
-        safe_name = _sanitize_filename(title)
+        # Fit to the filesystem limit, leaving room for the ".m3u8" extension.
+        name_budget = max(1, _fs_name_max(playlists_dir) - len(".m3u8"))
+        safe_name = _truncate_filename_bytes(_sanitize_filename(title), name_budget)
         m3u_path = os.path.join(playlists_dir, f"{safe_name}.m3u8")
 
         entries = []
